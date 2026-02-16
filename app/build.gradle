@@ -1,0 +1,118 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.example.camswap'
+    compileSdk 34
+
+    // Auto-versioning logic
+    def date = new Date()
+    def buildTime = date.format('yyyy-MM-dd HH:mm:ss')
+    def versionSuffix = date.format('MMddHHmm')
+    def versionCodeInt = date.format('yyMMddHH').toInteger()
+    
+    signingConfigs {
+        release {
+            Properties properties = new Properties()
+            if (rootProject.file("local.properties").exists()) {
+                properties.load(rootProject.file("local.properties").newDataInputStream())
+            }
+
+            if (properties.containsKey("storeFile")) {
+                storeFile file(properties.getProperty("storeFile"))
+                storePassword properties.getProperty("storePassword")
+                keyAlias properties.getProperty("keyAlias")
+                keyPassword properties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.example.camswap"
+        minSdk 26
+        targetSdk 34
+        versionCode versionCodeInt
+        versionName "0.16.${versionSuffix}"
+        
+        // Inject build time into BuildConfig
+        buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
+
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+    }
+
+    buildFeatures {
+        buildConfig = true
+        compose true
+    }
+    
+    composeOptions {
+        kotlinCompilerExtensionVersion '1.5.1'
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    buildTypes {
+        release {
+            if (signingConfigs.release.storeFile) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    splits {
+        abi {
+            enable true
+            reset()
+            include 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            universalApk false
+        }
+    }
+}
+
+dependencies {
+    compileOnly 'de.robv.android.xposed:api:82'
+    compileOnly 'de.robv.android.xposed:api:82:sources'
+    
+    // Core Dependencies
+    implementation 'androidx.core:core-ktx:1.10.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.6.1'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.6.1'
+    implementation 'androidx.activity:activity-compose:1.7.0'
+    implementation 'androidx.navigation:navigation-compose:2.7.5'
+    
+    // Compose Dependencies
+    implementation platform('androidx.compose:compose-bom:2023.08.00')
+    implementation 'androidx.compose.ui:ui'
+    implementation 'androidx.compose.ui:ui-graphics'
+    implementation 'androidx.compose.ui:ui-tooling-preview'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material:material-icons-extended'
+
+    // Test dependencies
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.mockito:mockito-core:4.11.0'
+    testImplementation 'org.mockito:mockito-inline:4.11.0'
+    testImplementation 'org.json:json:20231013'
+    testImplementation 'de.robv.android.xposed:api:82'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+    androidTestImplementation platform('androidx.compose:compose-bom:2023.08.00')
+    androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    debugImplementation 'androidx.compose.ui:ui-test-manifest'
+
+    // Coil for image loading and video thumbnails
+    implementation 'io.coil-kt:coil-compose:2.5.0'
+    implementation 'io.coil-kt:coil-video:2.5.0'
+}

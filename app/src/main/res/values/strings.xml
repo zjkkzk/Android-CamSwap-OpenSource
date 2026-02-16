@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CamSwap</string>
+    <string name="click_to_go_to_repo">前往 GitHub 仓库</string>
+    <string name="description">请访问在线仓库查看最新更新、使用教程及反馈问题</string>
+    <string name="Warning">严禁用于任何非法用途！！使用者需自行承担所有责任与后果！！</string>
+    <string name="switch1">强制显示权限缺失警告</string>
+    <string name="switch2">临时禁用模块（开启即禁用）</string>
+    <string name="switch3">播放视频声音</string>
+    <string name="switch4">强制所有应用使用私有目录</string>
+    <string name="gitee" translatable="false">前往 Gitee 仓库（国内加速）</string>
+    <string name="switch5">禁用 Toast 提示信息</string>
+    <string name="permission_switch_text">授予本地存储权限</string>
+    <string name="permission_lack_warn">缺少必要权限</string>
+    <string name="permission_description">访问本地存储的权限用于设置配置文件。如果拒绝，您需要手动配置文件。</string>
+    <string name="positive">确定</string>
+    <string name="negative">拒绝</string>
+    <string name="settings_title">设置</string>
+
+    <!-- Home Screen Status -->
+    <string name="status_no_permission">无权限</string>
+    <string name="status_no_video">未设置替换视频</string>
+    <string name="status_no_selection">未选择视频</string>
+    <string name="status_working">工作中</string>
+    <string name="status_paused">已暂停</string>
+    <string name="status_label_video">视频源</string>
+    <string name="status_label_play_mode">播放模式</string>
+    <string name="status_label_mic">麦克风</string>
+    <string name="status_label_video_sound">视频原声</string>
+    <string name="status_label_notification">通知控制</string>
+    <string name="status_label_target_apps">目标应用</string>
+    <string name="status_value_on">开启</string>
+    <string name="status_value_off">关闭</string>
+    <string name="status_value_random">随机模式</string>
+    <string name="status_value_random_play">随机播放</string>
+    <string name="status_value_sequential_play">顺序播放</string>
+    <string name="status_value_mic_mute">静音</string>
+    <string name="status_value_mic_replace">音频替换</string>
+    <string name="status_value_mic_sync">视频同步</string>
+    <string name="status_value_all_apps">全部应用</string>
+
+    <!-- Manage Screen -->
+    <string name="tab_video_manage">视频管理</string>
+    <string name="tab_image_manage">图片管理</string>
+    <string name="tab_audio_manage">音频管理</string>
+    <string name="desc_add_media">添加媒体</string>
+    <string name="stats_video_format">总计: %1$d | 大小: %2$.2f MB | 时长: %3$s</string>
+    <string name="stats_image_format">总计: %1$d | 大小: %2$.2f MB</string>
+    <string name="stats_audio_format">总计: %1$d | 大小: %2$.2f MB</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_category_general">常规设置</string>
+    <string name="settings_notification_control">启用通知栏控制</string>
+    <string name="settings_notification_control_desc">在通知栏快速切换视频</string>
+    <string name="settings_play_sound">播放声音</string>
+    <string name="settings_play_sound_desc">替换视频时播放原声音频</string>
+    <string name="settings_mic_hook">麦克风 Hook</string>
+    <string name="settings_mic_hook_desc">Hook 麦克风输入，替换或静音目标应用的音频采集</string>
+    <string name="mic_mode_mute">静音模式</string>
+    <string name="mic_mode_mute_desc">输出静音数据，目标无法听到任何声音</string>
+    <string name="mic_mode_replace">音频替换</string>
+    <string name="mic_mode_replace_desc">注入自定义音频文件（放置 Mic.mp3 到 DCIM/Camera1/）</string>
+    <string name="mic_mode_video_sync">视频同步</string>
+    <string name="mic_mode_video_sync_desc">播放当前替换视频的原声音轨</string>
+    <string name="settings_random_play">随机播放</string>
+    <string name="settings_random_play_desc">从视频列表中随机选择视频播放</string>
+    <string name="settings_category_advanced">高级设置</string>
+    <string name="settings_disable_module">禁用模块</string>
+    <string name="settings_disable_module_desc">暂时禁用所有Hook功能</string>
+
+    <!-- Navigation -->
+    <string name="nav_home">首页</string>
+    <string name="nav_manage">管理</string>
+    <string name="nav_settings">设置</string>
+</resources>
