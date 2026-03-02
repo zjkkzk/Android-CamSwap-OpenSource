@@ -16,11 +16,11 @@ import java.util.Arrays;
  * <p>
  * 功能：
  * <ul>
- *   <li>使用 MediaExtractor + MediaCodec 解码音频文件到 PCM 16-bit</li>
- *   <li>缓存解码后的 PCM 数据在内存中</li>
- *   <li>根据目标 AudioRecord 参数进行重采样和声道转换</li>
- *   <li>支持循环播放</li>
- *   <li>线程安全</li>
+ * <li>使用 MediaExtractor + MediaCodec 解码音频文件到 PCM 16-bit</li>
+ * <li>缓存解码后的 PCM 数据在内存中</li>
+ * <li>根据目标 AudioRecord 参数进行重采样和声道转换</li>
+ * <li>支持循环播放</li>
+ * <li>线程安全</li>
  * </ul>
  */
 public class AudioDataProvider {
@@ -32,7 +32,7 @@ public class AudioDataProvider {
     private static int pcmSampleRate = 0;
     private static int pcmChannels = 0;
 
-    // 播放位置（以 sample 为单位，一个 sample = 一个声道的一个采样点）
+    // 播放位置（以帧为单位，一帧 = 所有声道的一个采样点）
     private static long playbackPosition = 0;
 
     // 音频时长（毫秒），解码后计算
@@ -54,7 +54,7 @@ public class AudioDataProvider {
         String audioDir = VideoManager.video_path;
         String selectedAudio = VideoManager.getConfig().getString(
                 com.example.camswap.ConfigManager.KEY_SELECTED_AUDIO, null);
-        
+
         if (selectedAudio != null && !selectedAudio.isEmpty()) {
             File selected = new File(audioDir, selectedAudio);
             if (selected.exists()) {
@@ -102,8 +102,9 @@ public class AudioDataProvider {
                 return true;
             }
 
+            boolean isVirtualPath = "/proc/self/cmdline".equals(filePath);
             File file = new File(filePath);
-            if (!file.exists()) {
+            if (!isVirtualPath && !file.exists()) {
                 LogUtil.log(TAG + " 音频文件不存在: " + filePath);
                 return false;
             }
@@ -113,9 +114,22 @@ public class AudioDataProvider {
             MediaExtractor extractor = null;
             MediaCodec codec = null;
 
+            android.os.ParcelFileDescriptor providerPfd = null;
+
             try {
                 extractor = new MediaExtractor();
-                extractor.setDataSource(filePath);
+
+                if (isVirtualPath) {
+                    providerPfd = VideoManager.getVideoPFD();
+                    if (providerPfd != null) {
+                        extractor.setDataSource(providerPfd.getFileDescriptor());
+                    } else {
+                        LogUtil.log(TAG + " 无法获取 Provider 的 FileDescriptor 进行音频解码");
+                        return false;
+                    }
+                } else {
+                    extractor.setDataSource(filePath);
+                }
 
                 // 查找音频轨道
                 int audioTrack = -1;
@@ -243,16 +257,24 @@ public class AudioDataProvider {
                 return false;
             } finally {
                 try {
+                    if (providerPfd != null) {
+                        providerPfd.close();
+                    }
+                } catch (Exception ignored) {
+                }
+                try {
                     if (codec != null) {
                         codec.stop();
                         codec.release();
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
                 try {
                     if (extractor != null) {
                         extractor.release();
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
             }
         }
     }
@@ -335,9 +357,10 @@ public class AudioDataProvider {
      * @return 实际填充的字节数
      */
     public static int fillBytes(byte[] buffer, int offset, int size,
-                                int targetSampleRate, int targetChannels) {
+            int targetSampleRate, int targetChannels) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
 
             // 字节数 → sample 数（16-bit = 2 bytes per sample）
             int samplesNeeded = size / 2;
@@ -345,7 +368,8 @@ public class AudioDataProvider {
 
             int bytesToFill = Math.min(size, converted.length * 2);
             // short[] → byte[] (小端序)
-            for (int i = 0; i < converted.length && (i * 2 + 1) < size; i++) {
+            int shortsToWrite = bytesToFill / 2;
+            for (int i = 0; i < shortsToWrite; i++) {
                 buffer[offset + i * 2] = (byte) (converted[i] & 0xFF);
                 buffer[offset + i * 2 + 1] = (byte) ((converted[i] >> 8) & 0xFF);
             }
@@ -364,9 +388,10 @@ public class AudioDataProvider {
      * @return 实际填充的 short 数
      */
     public static int fillShorts(short[] buffer, int offset, int size,
-                                 int targetSampleRate, int targetChannels) {
+            int targetSampleRate, int targetChannels) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
 
             short[] converted = getConvertedSamples(size, targetSampleRate, targetChannels);
             int toFill = Math.min(size, converted.length);
@@ -386,9 +411,10 @@ public class AudioDataProvider {
      * @return 实际填充的 float 数
      */
     public static int fillFloats(float[] buffer, int offset, int size,
-                                 int targetSampleRate, int targetChannels) {
+            int targetSampleRate, int targetChannels) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
 
             short[] converted = getConvertedSamples(size, targetSampleRate, targetChannels);
             int toFill = Math.min(size, converted.length);
@@ -401,7 +427,8 @@ public class AudioDataProvider {
     }
 
     /**
-     * 填充 ByteBuffer 缓冲区（对应 AudioRecord.read(ByteBuffer, int) 和 read(ByteBuffer, int, int)）
+     * 填充 ByteBuffer 缓冲区（对应 AudioRecord.read(ByteBuffer, int) 和 read(ByteBuffer,
+     * int, int)）
      *
      * @param buffer           目标 ByteBuffer
      * @param size             要填充的字节数
@@ -410,9 +437,10 @@ public class AudioDataProvider {
      * @return 实际填充的字节数
      */
     public static int fillByteBuffer(ByteBuffer buffer, int size,
-                                     int targetSampleRate, int targetChannels) {
+            int targetSampleRate, int targetChannels) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
 
             int samplesNeeded = size / 2;
             short[] converted = getConvertedSamples(samplesNeeded, targetSampleRate, targetChannels);
@@ -436,13 +464,16 @@ public class AudioDataProvider {
      * 按绝对时间位置填充 byte[]（方案 C）
      */
     public static int fillBytesAtPosition(byte[] buffer, int offset, int size,
-                                          int targetSampleRate, int targetChannels, long positionMs) {
+            int targetSampleRate, int targetChannels, long positionMs) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
             int samplesNeeded = size / 2;
-            short[] converted = getConvertedSamplesAtPosition(samplesNeeded, targetSampleRate, targetChannels, positionMs);
+            short[] converted = getConvertedSamplesAtPosition(samplesNeeded, targetSampleRate, targetChannels,
+                    positionMs);
             int bytesToFill = Math.min(size, converted.length * 2);
-            for (int i = 0; i < converted.length && (i * 2 + 1) < size; i++) {
+            int shortsToWrite = bytesToFill / 2;
+            for (int i = 0; i < shortsToWrite; i++) {
                 buffer[offset + i * 2] = (byte) (converted[i] & 0xFF);
                 buffer[offset + i * 2 + 1] = (byte) ((converted[i] >> 8) & 0xFF);
             }
@@ -454,9 +485,10 @@ public class AudioDataProvider {
      * 按绝对时间位置填充 short[]（方案 C）
      */
     public static int fillShortsAtPosition(short[] buffer, int offset, int size,
-                                           int targetSampleRate, int targetChannels, long positionMs) {
+            int targetSampleRate, int targetChannels, long positionMs) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
             short[] converted = getConvertedSamplesAtPosition(size, targetSampleRate, targetChannels, positionMs);
             int toFill = Math.min(size, converted.length);
             System.arraycopy(converted, 0, buffer, offset, toFill);
@@ -468,9 +500,10 @@ public class AudioDataProvider {
      * 按绝对时间位置填充 float[]（方案 C）
      */
     public static int fillFloatsAtPosition(float[] buffer, int offset, int size,
-                                           int targetSampleRate, int targetChannels, long positionMs) {
+            int targetSampleRate, int targetChannels, long positionMs) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
             short[] converted = getConvertedSamplesAtPosition(size, targetSampleRate, targetChannels, positionMs);
             int toFill = Math.min(size, converted.length);
             for (int i = 0; i < toFill; i++) {
@@ -484,11 +517,13 @@ public class AudioDataProvider {
      * 按绝对时间位置填充 ByteBuffer（方案 C）
      */
     public static int fillByteBufferAtPosition(ByteBuffer buffer, int size,
-                                               int targetSampleRate, int targetChannels, long positionMs) {
+            int targetSampleRate, int targetChannels, long positionMs) {
         synchronized (lock) {
-            if (pcmData == null || pcmData.length == 0) return 0;
+            if (pcmData == null || pcmData.length == 0)
+                return 0;
             int samplesNeeded = size / 2;
-            short[] converted = getConvertedSamplesAtPosition(samplesNeeded, targetSampleRate, targetChannels, positionMs);
+            short[] converted = getConvertedSamplesAtPosition(samplesNeeded, targetSampleRate, targetChannels,
+                    positionMs);
             int bytesToFill = Math.min(size, converted.length * 2);
             ByteBuffer temp = ByteBuffer.allocate(bytesToFill).order(ByteOrder.LITTLE_ENDIAN);
             for (int i = 0; i < converted.length && i * 2 < bytesToFill; i++) {
@@ -507,6 +542,7 @@ public class AudioDataProvider {
     /**
      * 获取经过重采样和声道转换后的 PCM 数据。
      * 调用者需持有 lock。
+     * playbackPosition 以帧为单位（一帧 = 所有声道的一个采样点）。
      *
      * @param samplesNeeded    需要的 sample 数量（目标格式的 sample，包含声道）
      * @param targetSampleRate 目标采样率
@@ -514,7 +550,7 @@ public class AudioDataProvider {
      * @return 转换后的 short 数组
      */
     private static short[] getConvertedSamples(int samplesNeeded,
-                                               int targetSampleRate, int targetChannels) {
+            int targetSampleRate, int targetChannels) {
         if (pcmData == null || pcmData.length == 0) {
             return new short[0];
         }
@@ -522,9 +558,10 @@ public class AudioDataProvider {
         // 源数据的帧数（一帧 = 所有声道的一个采样点）
         int srcFrameCount = pcmData.length / pcmChannels;
 
-        // 目标的帧数
-        int targetFrameCount = samplesNeeded / targetChannels;
-        if (targetFrameCount <= 0) targetFrameCount = 1;
+        // 目标的帧数（向上取整，确保覆盖所有请求的样本）
+        int targetFrameCount = (samplesNeeded + targetChannels - 1) / targetChannels;
+        if (targetFrameCount <= 0)
+            targetFrameCount = 1;
 
         short[] result = new short[targetFrameCount * targetChannels];
 
@@ -532,8 +569,8 @@ public class AudioDataProvider {
         double ratio = (double) pcmSampleRate / targetSampleRate;
 
         for (int frame = 0; frame < targetFrameCount; frame++) {
-            // 计算在源数据中的位置（带循环）
-            double srcFramePos = (playbackPosition / targetChannels + frame) * ratio;
+            // playbackPosition 已经是帧单位，直接加 frame 偏移
+            double srcFramePos = (playbackPosition + frame) * ratio;
             long srcFrameIndex = (long) srcFramePos % srcFrameCount;
             double frac = srcFramePos - (long) srcFramePos;
 
@@ -548,10 +585,14 @@ public class AudioDataProvider {
                 int idx2 = (int) (nextFrameIndex * pcmChannels + srcCh);
 
                 // 边界保护
-                if (idx1 >= pcmData.length) idx1 = pcmData.length - 1;
-                if (idx2 >= pcmData.length) idx2 = pcmData.length - 1;
-                if (idx1 < 0) idx1 = 0;
-                if (idx2 < 0) idx2 = 0;
+                if (idx1 >= pcmData.length)
+                    idx1 = pcmData.length - 1;
+                if (idx2 >= pcmData.length)
+                    idx2 = pcmData.length - 1;
+                if (idx1 < 0)
+                    idx1 = 0;
+                if (idx2 < 0)
+                    idx2 = 0;
 
                 // 线性插值
                 short s1 = pcmData[idx1];
@@ -560,16 +601,24 @@ public class AudioDataProvider {
             }
         }
 
-        // 更新播放位置（以目标 sample 为单位）
-        playbackPosition += samplesNeeded;
-        // 循环：当播放位置超过一轮时重置
-        long totalTargetSamples = (long) (srcFrameCount / ratio) * targetChannels;
-        if (totalTargetSamples > 0) {
-            playbackPosition = playbackPosition % totalTargetSamples;
+        // 更新播放位置（以帧为单位）
+        playbackPosition += targetFrameCount;
+        // 循环：源数据对应的目标帧总数
+        long totalTargetFrames = (long) Math.ceil(srcFrameCount / ratio);
+        if (totalTargetFrames > 0) {
+            playbackPosition = playbackPosition % totalTargetFrames;
         }
 
         return result;
     }
+
+    // ================================================================
+    // 帧偏移追踪 — 解决 positionMs 更新频率低于 read() 调用频率的问题
+    // 当 MediaPlayer.getCurrentPosition() 在多次 read() 之间返回相同的值时，
+    // 使用累积帧偏移确保音频数据持续推进，避免重复读取产生电流声。
+    // ================================================================
+    private static long lastSyncPositionMs = -1;
+    private static long accumulatedFrameOffset = 0;
 
     /**
      * 根据绝对时间位置获取 PCM 数据（方案 C 专用，不更新 playbackPosition）。
@@ -582,22 +631,34 @@ public class AudioDataProvider {
      * @return 转换后的 short 数组
      */
     private static short[] getConvertedSamplesAtPosition(int samplesNeeded,
-                                                         int targetSampleRate, int targetChannels,
-                                                         long positionMs) {
+            int targetSampleRate, int targetChannels,
+            long positionMs) {
         if (pcmData == null || pcmData.length == 0) {
             return new short[0];
         }
 
         int srcFrameCount = pcmData.length / pcmChannels;
-        int targetFrameCount = samplesNeeded / targetChannels;
-        if (targetFrameCount <= 0) targetFrameCount = 1;
+        int targetFrameCount = (samplesNeeded + targetChannels - 1) / targetChannels;
+        if (targetFrameCount <= 0)
+            targetFrameCount = 1;
 
         short[] result = new short[targetFrameCount * targetChannels];
         double ratio = (double) pcmSampleRate / targetSampleRate;
 
-        // 将毫秒位置转换为源帧位置
-        long startSrcFrame = (long) (positionMs / 1000.0 * pcmSampleRate);
-        startSrcFrame = startSrcFrame % srcFrameCount; // 循环
+        // 帧偏移追踪：当 positionMs 与上次相同时，累积偏移量持续推进
+        if (positionMs != lastSyncPositionMs) {
+            // positionMs 变化了 — 重置累积偏移
+            lastSyncPositionMs = positionMs;
+            accumulatedFrameOffset = 0;
+        }
+
+        // 将毫秒位置转换为源帧位置，加上累积偏移
+        long baseSrcFrame = (long) (positionMs / 1000.0 * pcmSampleRate);
+        long offsetInSrcFrames = (long) (accumulatedFrameOffset * ratio);
+        long startSrcFrame = (baseSrcFrame + offsetInSrcFrames) % srcFrameCount;
+
+        // 更新累积偏移（以目标帧为单位）
+        accumulatedFrameOffset += targetFrameCount;
 
         for (int frame = 0; frame < targetFrameCount; frame++) {
             double srcFramePos = (startSrcFrame + frame * ratio);
@@ -609,10 +670,14 @@ public class AudioDataProvider {
                 int srcCh = ch % pcmChannels;
                 int idx1 = (int) (srcFrameIndex * pcmChannels + srcCh);
                 int idx2 = (int) (nextFrameIndex * pcmChannels + srcCh);
-                if (idx1 >= pcmData.length) idx1 = pcmData.length - 1;
-                if (idx2 >= pcmData.length) idx2 = pcmData.length - 1;
-                if (idx1 < 0) idx1 = 0;
-                if (idx2 < 0) idx2 = 0;
+                if (idx1 >= pcmData.length)
+                    idx1 = pcmData.length - 1;
+                if (idx2 >= pcmData.length)
+                    idx2 = pcmData.length - 1;
+                if (idx1 < 0)
+                    idx1 = 0;
+                if (idx2 < 0)
+                    idx2 = 0;
 
                 short s1 = pcmData[idx1];
                 short s2 = pcmData[idx2];

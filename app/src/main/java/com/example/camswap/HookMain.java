@@ -147,6 +147,7 @@ public class HookMain implements IXposedHookLoadPackage {
                             param.setResult(true);
                         }
                     });
+            return; // 模块自身只需要 hook isModuleActive，不需要注入 Camera/Mic 等 Hook
         }
 
         // Check if module is disabled
@@ -202,6 +203,13 @@ public class HookMain implements IXposedHookLoadPackage {
                                 LogUtil.log("【CS】Application.onCreate 预热：配置和视频路径已加载");
 
                                 initContentObserver(toast_content);
+
+                                try {
+                                    NativeAudioHook.init();
+                                    LogUtil.log("【CS】Native audio hooks initialized");
+                                } catch (Throwable t) {
+                                    LogUtil.log("【CS】Native audio hooks init failed: " + t);
+                                }
                             } catch (Exception ee) {
                                 LogUtil.log("【CS】" + ee.toString());
                             }
