@@ -7,7 +7,8 @@ import android.os.Build;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Map;
-import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -35,11 +36,18 @@ public class MicrophoneHandler implements ICameraHandler {
     // 方案 B 时长校验：是否已提醒过用户
     private static volatile boolean durationWarningShown = false;
 
+    // 视频同步模式：记住上次已知的播放位置，避免播放器暂时不可用时回退到 0
+    private static volatile long lastKnownPlaybackPositionMs = 0;
+
+    // 异步加载标记：使用 AtomicBoolean 防止竞态条件导致重复提交加载任务
+    private static final AtomicBoolean asyncLoadingInProgress = new AtomicBoolean(false);
+
     /**
      * 存储每个 AudioRecord 实例的构造参数
-     * 使用 WeakHashMap 避免内存泄漏
+     * 使用 ConcurrentHashMap 防止 GC 过早回收导致参数丢失，
+     * 在 AudioRecord.release() 时手动清理
      */
-    private static final Map<Object, AudioRecordParams> recordParamsMap = new WeakHashMap<>();
+    private static final Map<Object, AudioRecordParams> recordParamsMap = new ConcurrentHashMap<>();
 
     /**
      * AudioRecord 构造参数
@@ -100,8 +108,8 @@ public class MicrophoneHandler implements ICameraHandler {
     // ================================================================
 
     /**
-     * 检查是否为替换模式，并确保音频数据已加载
-     * 每次调用都检查配置文件路径是否变更，变更时重新加载
+     * 检查是否为替换模式，并确保音频数据已加载。
+     * 如果数据尚未就绪，触发异步加载并返回 false（本次 read 用静音填充，下次再替换）。
      */
     private static boolean isReplaceMode() {
         if (!ConfigManager.MIC_MODE_REPLACE.equals(getMicHookMode())) {
@@ -114,16 +122,17 @@ public class MicrophoneHandler implements ICameraHandler {
         // 检查是否需要（重新）加载：未就绪 或 文件已切换
         String loadedPath = AudioDataProvider.getCurrentFilePath();
         if (!AudioDataProvider.isReady() || !audioPath.equals(loadedPath)) {
-            AudioDataProvider.loadAudioFile(audioPath);
-            durationWarningShown = false; // 文件变了，重置警告
-            checkDurationMismatch();
+            // 异步加载，不阻塞音频线程
+            final String pathToLoad = audioPath;
+            preloadAudioFileAsync(pathToLoad);
+            return false; // 数据还没准备好，本次用静音
         }
-        return AudioDataProvider.isReady();
+        return true;
     }
 
     /**
-     * 检查是否为视频同步模式，并确保视频音轨数据已加载
-     * 每次调用都检查视频路径是否变更，变更时重新加载
+     * 检查是否为视频同步模式，并确保视频音轨数据已加载。
+     * 如果数据尚未就绪，触发异步加载并返回 false。
      */
     private static boolean isVideoSyncMode() {
         if (!ConfigManager.MIC_MODE_VIDEO_SYNC.equals(getMicHookMode())) {
@@ -135,14 +144,66 @@ public class MicrophoneHandler implements ICameraHandler {
 
         String loadedPath = AudioDataProvider.getCurrentFilePath();
         if (!AudioDataProvider.isReady() || !videoPath.equals(loadedPath)) {
-            AudioDataProvider.loadAudioFile(videoPath);
+            // 异步加载，不阻塞音频线程
+            final String pathToLoad = videoPath;
+            preloadAudioFileAsync(pathToLoad);
+            return false;
         }
-        return AudioDataProvider.isReady();
+        return true;
+    }
+
+    /**
+     * 异步预加载音频数据（根据当前模式决定加载什么文件）
+     */
+    private static void preloadAudioAsync() {
+        if (!isMicHookEnabled()) return;
+        String mode = getMicHookMode();
+        String pathToLoad = null;
+        if (ConfigManager.MIC_MODE_REPLACE.equals(mode)) {
+            pathToLoad = AudioDataProvider.getAudioFilePath();
+        } else if (ConfigManager.MIC_MODE_VIDEO_SYNC.equals(mode)) {
+            pathToLoad = VideoManager.getCurrentVideoPath();
+        }
+        if (pathToLoad != null) {
+            preloadAudioFileAsync(pathToLoad);
+        }
+    }
+
+    /**
+     * 在后台线程中加载指定音频文件，避免阻塞音频回调线程。
+     * 使用 asyncLoadingInProgress 标记防止重复提交。
+     */
+    private static void preloadAudioFileAsync(final String filePath) {
+        if (filePath == null) return;
+        // 已经加载了同一文件，无需重复
+        if (filePath.equals(AudioDataProvider.getCurrentFilePath()) && AudioDataProvider.isReady()) {
+            return;
+        }
+        if (!asyncLoadingInProgress.compareAndSet(false, true)) return;
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    LogUtil.log(TAG + " 异步加载音频: " + filePath);
+                    AudioDataProvider.loadAudioFile(filePath);
+                    durationWarningShown = false;
+                    checkDurationMismatch();
+                    LogUtil.log(TAG + " 异步加载完成: " + filePath
+                            + " ready=" + AudioDataProvider.isReady());
+                } catch (Exception e) {
+                    LogUtil.log(TAG + " 异步加载失败: " + e);
+                } finally {
+                    asyncLoadingInProgress.set(false);
+                }
+            }
+        }, "CS-AudioPreload").start();
     }
 
     /**
      * 获取当前视频 MediaPlayer 的播放位置（毫秒）
-     * 按优先级尝试所有可能的 MediaPlayer 实例
+     * 按优先级尝试所有可能的 MediaPlayer 实例。
+     * 当所有播放器都不在播放时，返回上次已知位置而非 0，防止同步失效。
      */
     private static long getVideoPlaybackPositionMs() {
         MediaPlayer[] players = {
@@ -152,22 +213,36 @@ public class MicrophoneHandler implements ICameraHandler {
         for (MediaPlayer mp : players) {
             try {
                 if (mp != null && mp.isPlaying()) {
-                    return mp.getCurrentPosition();
+                    long pos = mp.getCurrentPosition();
+                    lastKnownPlaybackPositionMs = pos;
+                    return pos;
                 }
             } catch (Exception ignored) {
             }
         }
-        return 0;
+        // 返回上次已知位置，避免在播放器暂时不可用时音频跳回开头
+        return lastKnownPlaybackPositionMs;
     }
 
     /**
      * 获取指定 AudioRecord 实例的参数
      */
     private static AudioRecordParams getParams(Object audioRecord) {
-        synchronized (recordParamsMap) {
-            AudioRecordParams params = recordParamsMap.get(audioRecord);
-            if (params != null)
-                return params;
+        AudioRecordParams params = recordParamsMap.get(audioRecord);
+        if (params != null)
+            return params;
+        // 回退：尝试从 AudioRecord 实例动态获取参数
+        try {
+            int sampleRate = (int) XposedHelpers.callMethod(audioRecord, "getSampleRate");
+            int channelConfig = (int) XposedHelpers.callMethod(audioRecord, "getChannelConfiguration");
+            int audioFormat = (int) XposedHelpers.callMethod(audioRecord, "getAudioFormat");
+            params = new AudioRecordParams(0, sampleRate, channelConfig, audioFormat, 4096);
+            recordParamsMap.put(audioRecord, params);
+            LogUtil.log(TAG + " 动态获取 AudioRecord 参数: sampleRate=" + sampleRate
+                    + " channelConfig=" + channelConfig + " audioFormat=" + audioFormat);
+            return params;
+        } catch (Exception e) {
+            LogUtil.log(TAG + " 动态获取参数失败，使用默认值: " + e);
         }
         return new AudioRecordParams(0, 44100,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, 4096);
@@ -221,6 +296,26 @@ public class MicrophoneHandler implements ICameraHandler {
     }
 
     // ================================================================
+    // 供 NativeAudioHook 调用的 package-visible 静态方法
+    // ================================================================
+
+    static boolean isMicHookEnabledStatic() {
+        return isMicHookEnabled();
+    }
+
+    static String getMicHookModeStatic() {
+        return getMicHookMode();
+    }
+
+    static long getVideoPlaybackPositionMsStatic() {
+        return getVideoPlaybackPositionMs();
+    }
+
+    static void preloadAudioAsyncStatic() {
+        preloadAudioAsync();
+    }
+
+    // ================================================================
     // Hook 初始化
     // ================================================================
 
@@ -252,30 +347,95 @@ public class MicrophoneHandler implements ICameraHandler {
 
                             AudioRecordParams params = new AudioRecordParams(
                                     audioSource, sampleRate, channelConfig, audioFormat, bufferSize);
-                            synchronized (recordParamsMap) {
-                                recordParamsMap.put(param.thisObject, params);
-                            }
+                            recordParamsMap.put(param.thisObject, params);
 
-                            // 预加载音频数据
-                            if (isMicHookEnabled()) {
-                                String mode = getMicHookMode();
-                                if (ConfigManager.MIC_MODE_REPLACE.equals(mode)) {
-                                    String audioPath = AudioDataProvider.getAudioFilePath();
-                                    if (audioPath != null) {
-                                        AudioDataProvider.loadAudioFile(audioPath);
-                                        checkDurationMismatch();
-                                    }
-                                } else if (ConfigManager.MIC_MODE_VIDEO_SYNC.equals(mode)) {
-                                    String videoPath = VideoManager.getCurrentVideoPath();
-                                    if (videoPath != null) {
-                                        AudioDataProvider.loadAudioFile(videoPath);
-                                    }
-                                }
-                            }
+                            // 异步预加载音频数据（不阻塞构造线程）
+                            preloadAudioAsync();
                         }
                     });
         } catch (Throwable t) {
             LogUtil.log(TAG + " Hook AudioRecord 构造函数失败: " + t);
+        }
+
+        // ============================================================
+        // 1.5 Hook AudioRecord.Builder.build() — 捕获 Builder 模式创建的 AudioRecord
+        // ============================================================
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                        "android.media.AudioRecord$Builder", lpparam.classLoader,
+                        "build",
+                        new XC_MethodHook() {
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                Object audioRecord = param.getResult();
+                                if (audioRecord == null)
+                                    return;
+
+                                try {
+                                    int sampleRate = (int) XposedHelpers.callMethod(audioRecord, "getSampleRate");
+                                    int channelConfig = (int) XposedHelpers.callMethod(audioRecord,
+                                            "getChannelConfiguration");
+                                    int audioFormat = (int) XposedHelpers.callMethod(audioRecord, "getAudioFormat");
+                                    int bufferSize = (int) XposedHelpers.callMethod(audioRecord,
+                                            "getBufferSizeInFrames");
+                                    int audioSource = 0;
+
+                                    LogUtil.log(TAG + " AudioRecord.Builder.build(): sampleRate=" + sampleRate
+                                            + " channelConfig=" + channelConfig
+                                            + " audioFormat=" + audioFormat
+                                            + " bufferSize=" + bufferSize);
+
+                                    AudioRecordParams params = new AudioRecordParams(
+                                            audioSource, sampleRate, channelConfig, audioFormat, bufferSize);
+                                    recordParamsMap.put(audioRecord, params);
+
+                                    // 异步预加载音频数据
+                                    preloadAudioAsync();
+                                } catch (Exception e) {
+                                    LogUtil.log(TAG + " 获取 Builder 创建的 AudioRecord 参数失败: " + e);
+                                }
+                            }
+                        });
+            } catch (Throwable t) {
+                LogUtil.log(TAG + " Hook AudioRecord.Builder.build() 失败: " + t);
+            }
+        }
+
+        // ============================================================
+        // 1.6 Hook AudioRecord.release() — 清理参数映射
+        // ============================================================
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "android.media.AudioRecord", lpparam.classLoader,
+                    "release",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            recordParamsMap.remove(param.thisObject);
+                        }
+                    });
+        } catch (Throwable t) {
+            LogUtil.log(TAG + " Hook AudioRecord.release() 失败: " + t);
+        }
+
+        // ============================================================
+        // 1.7 Hook AudioRecord.startRecording() — 确保音频数据在录制前已加载
+        // ============================================================
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "android.media.AudioRecord", lpparam.classLoader,
+                    "startRecording",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            LogUtil.log(TAG + " AudioRecord.startRecording() 被调用, micHook="
+                                    + isMicHookEnabled() + " mode=" + getMicHookMode());
+                            preloadAudioAsync();
+                        }
+                    });
+        } catch (Throwable t) {
+            LogUtil.log(TAG + " Hook AudioRecord.startRecording() 失败: " + t);
         }
 
         // ============================================================
@@ -297,6 +457,8 @@ public class MicrophoneHandler implements ICameraHandler {
                             byte[] buffer = (byte[]) param.args[0];
                             int offset = (int) param.args[1];
                             AudioRecordParams p = getParams(param.thisObject);
+
+                            logReadCall(result, "byte[]");
 
                             if (isVideoSyncMode()) {
                                 long posMs = getVideoPlaybackPositionMs();
@@ -334,6 +496,8 @@ public class MicrophoneHandler implements ICameraHandler {
                             int offset = (int) param.args[1];
                             AudioRecordParams p = getParams(param.thisObject);
 
+                            logReadCall(result, "short[]");
+
                             if (isVideoSyncMode()) {
                                 long posMs = getVideoPlaybackPositionMs();
                                 AudioDataProvider.fillShortsAtPosition(buffer, offset, result,
@@ -369,6 +533,8 @@ public class MicrophoneHandler implements ICameraHandler {
                             ByteBuffer buffer = (ByteBuffer) param.args[0];
                             int pos = buffer.position();
                             AudioRecordParams p = getParams(param.thisObject);
+
+                            logReadCall(result, "ByteBuffer");
 
                             if (isVideoSyncMode()) {
                                 long posMs = getVideoPlaybackPositionMs();
@@ -414,6 +580,8 @@ public class MicrophoneHandler implements ICameraHandler {
                                 int offset = (int) param.args[1];
                                 AudioRecordParams p = getParams(param.thisObject);
 
+                                logReadCall(result, "float[]");
+
                                 if (isVideoSyncMode()) {
                                     long posMs = getVideoPlaybackPositionMs();
                                     AudioDataProvider.fillFloatsAtPosition(buffer, offset, result,
@@ -451,6 +619,8 @@ public class MicrophoneHandler implements ICameraHandler {
                                 ByteBuffer buffer = (ByteBuffer) param.args[0];
                                 int pos = buffer.position();
                                 AudioRecordParams p = getParams(param.thisObject);
+
+                                logReadCall(result, "ByteBuffer(int,int)");
 
                                 if (isVideoSyncMode()) {
                                     long posMs = getVideoPlaybackPositionMs();
@@ -496,5 +666,19 @@ public class MicrophoneHandler implements ICameraHandler {
         }
 
         LogUtil.log(TAG + " 麦克风 Hook 初始化完成");
+    }
+
+    private static volatile int readHookCount = 0;
+
+    private static void logReadCall(int result, String method) {
+        if (readHookCount < 10) {
+            readHookCount++;
+            LogUtil.log(TAG + " AudioRecord.read(" + method + ") 被调用 #" + readHookCount
+                    + " result=" + result + " micHookEnabled=" + isMicHookEnabled()
+                    + " mode=" + getMicHookMode());
+            if (readHookCount == 10) {
+                LogUtil.log(TAG + " AudioRecord.read 调用日志已达到 10 次上限，后续调用不再打印。");
+            }
+        }
     }
 }

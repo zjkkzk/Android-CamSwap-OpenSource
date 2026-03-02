@@ -34,12 +34,19 @@ android {
         minSdk 26
         targetSdk 34
         versionCode versionCodeInt
-        versionName "0.20.${versionSuffix}"
+        versionName "2.2.${versionSuffix}"
         
         // Inject build time into BuildConfig
         buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
 
         testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -fno-exceptions -fno-rtti"
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
     }
 
     buildFeatures {
@@ -70,6 +77,13 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
     }
 
     splits {
