@@ -134,4 +134,4 @@ keyPassword=your_key_password
 
 ## 📄 许可证
 
-本项目基于 [MIT 许可证](LICENSE) 开源。
+本项目基于 [GPL-3.0 license](LICENSE) 开源。
