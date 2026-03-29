@@ -151,6 +151,12 @@ public class MicrophoneHandler implements ICameraHandler {
         if (!ConfigManager.MIC_MODE_VIDEO_SYNC.equals(getMicHookMode())) {
             return false;
         }
+        // Stream mode: video_sync is not supported (no local FD to extract audio).
+        // Degrade to mute and log.
+        if (VideoManager.isStreamMode()) {
+            LogUtil.log("【CS】流模式下 video_sync 不可用，自动降级为静音");
+            return false;
+        }
         String videoPath = VideoManager.getCurrentVideoPath();
         if (videoPath == null)
             return false;

@@ -51,6 +51,16 @@ public class ConfigManager {
     public static final String KEY_ENABLE_PHOTO_FAKE = "enable_photo_fake"; // 启用拍照替换 (动态防御)
     public static final String KEY_ENABLE_WHATSAPP_CAMERA2_COMPAT = "enable_whatsapp_camera2_compat";
 
+    // Stream media source keys
+    public static final String KEY_MEDIA_SOURCE_TYPE = "media_source_type";       // "local" | "stream"
+    public static final String KEY_STREAM_URL = "stream_url";                     // rtsp://... etc.
+    public static final String KEY_STREAM_AUTO_RECONNECT = "stream_auto_reconnect";
+    public static final String KEY_STREAM_LOCAL_FALLBACK = "stream_enable_local_fallback";
+    public static final String KEY_STREAM_TRANSPORT_HINT = "stream_transport_hint"; // "auto" | "tcp" | "udp"
+    public static final String KEY_STREAM_TIMEOUT_MS = "stream_timeout_ms";
+    public static final String MEDIA_SOURCE_LOCAL = "local";
+    public static final String MEDIA_SOURCE_STREAM = "stream";
+
     // Broadcast Actions
     public static final String ACTION_UPDATE_CONFIG = IpcContract.ACTION_UPDATE_CONFIG;
     public static final String ACTION_REQUEST_CONFIG = IpcContract.ACTION_REQUEST_CONFIG;
@@ -353,6 +363,19 @@ public class ConfigManager {
         Set<String> packages = getTargetPackages();
         packages.remove(pkg);
         setTargetPackages(packages);
+    }
+
+    public long getLong(String key, long defValue) {
+        return configData.optLong(key, defValue);
+    }
+
+    public void setLong(String key, long value) {
+        try {
+            configData.put(key, value);
+            save();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
     }
 
     public String getString(String key, String defValue) {

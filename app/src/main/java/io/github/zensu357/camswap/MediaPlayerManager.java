@@ -8,10 +8,12 @@ import io.github.zensu357.camswap.utils.LogUtil;
 import io.github.zensu357.camswap.utils.VideoManager;
 
 /**
- * Manages all MediaPlayer, GLVideoRenderer, and SurfaceRelay instances.
+ * Manages all player backends, GLVideoRenderer, and SurfaceRelay instances.
  * Centralizes player lifecycle, restart, rotation, and release logic.
  * <p>
- * Future: supports per-app video via {@link #setPackageName(String)}.
+ * In local mode each slot gets its own {@link AndroidMediaPlayerBackend}.
+ * In stream mode all slots share frames from a single {@link ExoPlayerBackend}
+ * routed through their respective GL renderers.
  */
 public final class MediaPlayerManager {
     private final Object mediaLock = new Object();
@@ -41,6 +43,9 @@ public final class MediaPlayerManager {
     SurfaceRelay c2_reader_relay;
     SurfaceRelay c2_reader_relay_1;
 
+    // ---- Stream mode: single shared ExoPlayerBackend ----
+    private SurfacePlayerBackend streamBackend;
+
     /** Set current package name (future per-app video). */
     public void setPackageName(String packageName) {
         this.currentPackageName = packageName;
@@ -48,10 +53,19 @@ public final class MediaPlayerManager {
 
     /**
      * Central video path query.
-     * TODO(功能二): return VideoManager.getVideoPathForPackage(currentPackageName);
      */
     String getVideoPath() {
         return VideoManager.getCurrentVideoPath();
+    }
+
+    /** Get current media source descriptor from config. */
+    MediaSourceDescriptor getMediaSource() {
+        return VideoManager.getCurrentMediaSource();
+    }
+
+    /** Whether we are currently in stream mode. */
+    boolean isStreamMode() {
+        return VideoManager.isStreamMode();
     }
 
     // =====================================================================
@@ -59,9 +73,25 @@ public final class MediaPlayerManager {
     // =====================================================================
 
     /**
-     * Initialize Camera2 MediaPlayers for the given surfaces.
+     * Initialize Camera2 players for the given surfaces.
+     * In stream mode, creates a single ExoPlayerBackend for the primary preview
+     * and routes frames to reader surfaces via GL renderers.
      */
     void initCamera2Players(Surface readerSurface, Surface readerSurface1,
+            Surface previewSurface, Surface previewSurface1) {
+
+        MediaSourceDescriptor source = getMediaSource();
+
+        if (source.isStream()) {
+            initCamera2PlayersStream(readerSurface, readerSurface1,
+                    previewSurface, previewSurface1, source);
+        } else {
+            initCamera2PlayersLocal(readerSurface, readerSurface1,
+                    previewSurface, previewSurface1);
+        }
+    }
+
+    private void initCamera2PlayersLocal(Surface readerSurface, Surface readerSurface1,
             Surface previewSurface, Surface previewSurface1) {
         if (readerSurface != null) {
             c2_reader_player = recreatePlayer(c2_reader_player);
@@ -98,7 +128,116 @@ public final class MediaPlayerManager {
             c2_renderer_1 = r[0];
             c2_relay_1 = rr[0];
         }
-        LogUtil.log("【CS】Camera2处理过程完全执行");
+        LogUtil.log("【CS】Camera2处理过程完全执行（本地模式）");
+    }
+
+    private void initCamera2PlayersStream(Surface readerSurface, Surface readerSurface1,
+            Surface previewSurface, Surface previewSurface1,
+            MediaSourceDescriptor source) {
+        // Release any old stream backend
+        releaseStreamBackend();
+
+        int rotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+
+        // Choose primary surface: prefer preview, fallback to reader
+        Surface primaryTarget = previewSurface != null ? previewSurface : readerSurface;
+        if (primaryTarget == null) {
+            LogUtil.log("【CS】流模式：无可用目标 Surface");
+            return;
+        }
+
+        // Set up GL renderers for all surfaces (stream frames are shared)
+        if (readerSurface != null) {
+            GLVideoRenderer.releaseSafely(c2_reader_renderer);
+            SurfaceRelay.releaseSafely(c2_reader_relay);
+            c2_reader_renderer = GLVideoRenderer.createSafely(readerSurface, "c2_reader_stream");
+            if (c2_reader_renderer != null) c2_reader_renderer.setRotation(rotation);
+        }
+        if (readerSurface1 != null) {
+            GLVideoRenderer.releaseSafely(c2_reader_renderer_1);
+            SurfaceRelay.releaseSafely(c2_reader_relay_1);
+            c2_reader_renderer_1 = GLVideoRenderer.createSafely(readerSurface1, "c2_reader_1_stream");
+            if (c2_reader_renderer_1 != null) c2_reader_renderer_1.setRotation(rotation);
+        }
+        if (previewSurface != null) {
+            GLVideoRenderer.releaseSafely(c2_renderer);
+            SurfaceRelay.releaseSafely(c2_relay);
+            c2_renderer = GLVideoRenderer.createSafely(previewSurface, "c2_preview_stream");
+            if (c2_renderer != null) c2_renderer.setRotation(rotation);
+        }
+        if (previewSurface1 != null) {
+            GLVideoRenderer.releaseSafely(c2_renderer_1);
+            SurfaceRelay.releaseSafely(c2_relay_1);
+            c2_renderer_1 = GLVideoRenderer.createSafely(previewSurface1, "c2_preview_1_stream");
+            if (c2_renderer_1 != null) c2_renderer_1.setRotation(rotation);
+        }
+
+        // Create stream backend — output to primary GL renderer's input surface
+        try {
+            streamBackend = createStreamBackend();
+            GLVideoRenderer primaryRenderer = (previewSurface != null) ? c2_renderer : c2_reader_renderer;
+            Surface backendSurface;
+            if (primaryRenderer != null && primaryRenderer.isInitialized()) {
+                backendSurface = primaryRenderer.getInputSurface();
+            } else {
+                backendSurface = primaryTarget;
+            }
+            streamBackend.setOutputSurface(backendSurface);
+            streamBackend.setVolume(VideoManager.getConfig().getBoolean(
+                    ConfigManager.KEY_PLAY_VIDEO_SOUND, false) ? 1.0f : 0f);
+            streamBackend.setLooping(false); // streams don't loop
+            streamBackend.setListener(new SurfacePlayerBackend.Listener() {
+                @Override
+                public void onReady() {
+                    LogUtil.log("【CS】流播放器就绪");
+                    lastCamera2PlaybackStartRealtimeMs = SystemClock.elapsedRealtime();
+                }
+
+                @Override
+                public void onError(String message, Throwable cause) {
+                    LogUtil.log("【CS】流播放器错误: " + message
+                            + (cause != null ? " " + cause : ""));
+                }
+
+                @Override
+                public void onDisconnected() {
+                    LogUtil.log("【CS】流断开连接");
+                }
+
+                @Override
+                public void onReconnected() {
+                    LogUtil.log("【CS】流重连成功");
+                }
+
+                @Override
+                public void onCompletion() {
+                    LogUtil.log("【CS】流播放完成");
+                }
+            });
+            streamBackend.open(source);
+            LogUtil.log("【CS】Camera2处理过程完全执行（流模式: " + source.streamUrl + "）");
+        } catch (Exception e) {
+            LogUtil.log("【CS】流模式初始化失败: " + android.util.Log.getStackTraceString(e));
+        }
+    }
+
+    private SurfacePlayerBackend createStreamBackend() {
+        // Try to create ExoPlayerBackend via reflection to avoid hard compile dependency
+        // when Media3 is not on classpath (should not happen with proper gradle setup)
+        try {
+            Class<?> clazz = Class.forName("io.github.zensu357.camswap.ExoPlayerBackend");
+            return (SurfacePlayerBackend) clazz.getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+            LogUtil.log("【CS】ExoPlayerBackend 不可用，回退到 AndroidMediaPlayerBackend: " + e);
+            return new AndroidMediaPlayerBackend();
+        }
+    }
+
+    private void releaseStreamBackend() {
+        if (streamBackend != null) {
+            streamBackend.release();
+            streamBackend = null;
+        }
     }
 
     private MediaPlayer recreatePlayer(MediaPlayer old) {
@@ -108,6 +247,15 @@ public final class MediaPlayerManager {
     }
 
     long getCamera2PlaybackPositionMs() {
+        // Stream mode: query stream backend
+        if (streamBackend != null) {
+            try {
+                long pos = streamBackend.getCurrentPositionMs();
+                if (pos > 0) return pos;
+            } catch (Exception ignored) {
+            }
+        }
+
         MediaPlayer[] players = {
                 c2_player, c2_player_1,
                 c2_reader_player, c2_reader_player_1,
@@ -151,16 +299,24 @@ public final class MediaPlayerManager {
     // Restart / rotation / release
     // =====================================================================
 
-    /** Restart all active MediaPlayers with current video. */
+    /** Restart all active players with current video/stream. */
     void restartAll() {
         synchronized (mediaLock) {
-            VideoManager.checkProviderAvailability();
-            restartSinglePlayer(mplayer1, c1_renderer_holder, "mplayer1");
-            restartSinglePlayer(mMediaPlayer, c1_renderer_texture, "mMediaPlayer");
-            restartSinglePlayer(c2_reader_player, c2_reader_renderer, "c2_reader_player");
-            restartSinglePlayer(c2_reader_player_1, c2_reader_renderer_1, "c2_reader_player_1");
-            restartSinglePlayer(c2_player, c2_renderer, "c2_player");
-            restartSinglePlayer(c2_player_1, c2_renderer_1, "c2_player_1");
+            if (isStreamMode()) {
+                // Stream mode: restart the single stream backend
+                if (streamBackend != null) {
+                    streamBackend.restart();
+                }
+            } else {
+                // Local mode: restart individual MediaPlayers
+                VideoManager.checkProviderAvailability();
+                restartSinglePlayer(mplayer1, c1_renderer_holder, "mplayer1");
+                restartSinglePlayer(mMediaPlayer, c1_renderer_texture, "mMediaPlayer");
+                restartSinglePlayer(c2_reader_player, c2_reader_renderer, "c2_reader_player");
+                restartSinglePlayer(c2_reader_player_1, c2_reader_renderer_1, "c2_reader_player_1");
+                restartSinglePlayer(c2_player, c2_renderer, "c2_player");
+                restartSinglePlayer(c2_player_1, c2_renderer_1, "c2_player_1");
+            }
         }
     }
 
@@ -232,6 +388,7 @@ public final class MediaPlayerManager {
 
     /** Release Camera2 players and renderers (called from onOpened). */
     void releaseCamera2Resources() {
+        releaseStreamBackend();
         GLVideoRenderer.releaseSafely(c2_renderer);
         c2_renderer = null;
         GLVideoRenderer.releaseSafely(c2_renderer_1);
@@ -261,7 +418,7 @@ public final class MediaPlayerManager {
     }
 
     // =====================================================================
-    // Private: three-tier surface rendering setup
+    // Private: three-tier surface rendering setup (local mode)
     // =====================================================================
 
     private void setupMediaPlayer(MediaPlayer player, GLVideoRenderer[] rendererRef,

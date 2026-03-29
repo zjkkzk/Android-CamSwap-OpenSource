@@ -34,6 +34,19 @@ public class Camera2Handler implements ICameraHandler {
         hookAddTarget(classLoader, packageName);
         hookRemoveTarget(classLoader, packageName);
         hookBuild(classLoader, packageName);
+
+        // Pre-install session hooks on CameraDeviceImpl (framework internal class).
+        // This ensures createCaptureSession interception works even if
+        // the onOpened hook on obfuscated StateCallback classes doesn't fire
+        // (due to ART optimization preventing hook on app-level classes).
+        try {
+            Class<?> deviceImplClass = Class.forName(
+                    "android.hardware.camera2.impl.CameraDeviceImpl", false, classLoader);
+            HookMain.camera2Hook.hookAllCreateSessionVariants(deviceImplClass);
+            LogUtil.log("【CS】已在 CameraDeviceImpl 上预装 session hooks");
+        } catch (Throwable t) {
+            LogUtil.log("【CS】预装 session hooks 失败: " + t);
+        }
     }
 
     // ================================================================
@@ -153,7 +166,12 @@ public class Camera2Handler implements ICameraHandler {
                         HookMain.camera2Hook.rememberPreviewSurface(originalSurface);
                     }
                     LogUtil.log("【CS】添加目标：" + originalSurface.toString());
-                    args[0] = HookMain.camera2Hook.getVirtualSurface();
+                    // Ensure virtual surface exists (lazy creation if onOpened hook didn't fire)
+                    Surface vSurface = HookMain.camera2Hook.getVirtualSurface();
+                    if (vSurface == null || !vSurface.isValid()) {
+                        vSurface = HookMain.camera2Hook.ensureVirtualSurface();
+                    }
+                    args[0] = vSurface;
                 } catch (Throwable t) {
                     LogUtil.log("【CS】addTarget before 异常: " + t);
                 }
@@ -203,13 +221,17 @@ public class Camera2Handler implements ICameraHandler {
             Api101Runtime.requireModule().hook(method).intercept(chain -> {
                 try {
                     Object thisObject = chain.getThisObject();
-                    if (thisObject != null && !thisObject.equals(HookMain.camera2Hook.captureBuilder)) {
+                    boolean isNewBuilder = thisObject != null
+                            && !thisObject.equals(HookMain.camera2Hook.captureBuilder);
+                    boolean hasPending = HookMain.camera2Hook.pendingPlayback;
+                    if (thisObject != null && (isNewBuilder || hasPending)) {
                         HookMain.camera2Hook.captureBuilder = (CaptureRequest.Builder) thisObject;
                         if (!HookGuards.shouldBypass(packageName, HookGuards.getCurrentVideoFile())) {
                             if (HookMain.camera2Hook.isCurrentSessionBypassed()) {
                                 LogUtil.log("【CS】当前会话已旁路，跳过虚拟播放启动");
                             } else {
-                                LogUtil.log("【CS】开始build请求");
+                                LogUtil.log("【CS】开始build请求"
+                                        + (hasPending ? " (延迟重试)" : ""));
                                 if (VideoManager.getConfig().getBoolean(ConfigManager.KEY_ENABLE_PHOTO_FAKE, false)
                                         && HookMain.camera2Hook.pendingPhotoSurface != null
                                         && HookMain.camera2Hook.isJpegReaderSurface(

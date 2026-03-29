@@ -37,6 +37,10 @@
   public static final android.os.Parcelable$Creator *;
 }
 
+# ExoPlayer (Media3) - safety net for reflection-based class loading
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
+
 # Jetpack Compose
 -keep class androidx.compose.** { *; }
 -dontwarn androidx.compose.**

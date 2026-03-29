@@ -11,6 +11,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
@@ -18,13 +19,19 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.SettingsInputAntenna
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.FolderSpecial
 import androidx.compose.material.icons.outlined.NotificationsOff
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -39,11 +46,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.zensu357.camswap.BuildConfig
+import io.github.zensu357.camswap.ConfigManager
 import io.github.zensu357.camswap.R
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsState()
@@ -133,6 +143,174 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     checked = uiState.enableRandomPlay,
                     onCheckedChange = { viewModel.setEnableRandomPlay(it) }
             )
+        }
+
+        // ==================== Stream Settings ====================
+        SettingsSection(title = stringResource(R.string.settings_category_stream)) {
+            // Source type toggle: local vs stream
+            val isStreamMode = uiState.mediaSourceType == ConfigManager.MEDIA_SOURCE_STREAM
+
+            Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                        imageVector = Icons.Default.SettingsInputAntenna,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        modifier = Modifier.size(22.dp)
+                )
+                Spacer(modifier = Modifier.width(14.dp))
+                Text(
+                        text = stringResource(R.string.settings_media_source_type),
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                )
+            }
+
+            Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 36.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                        selected = !isStreamMode,
+                        onClick = { viewModel.setMediaSourceType(ConfigManager.MEDIA_SOURCE_LOCAL) },
+                        label = { Text(stringResource(R.string.settings_media_source_local)) },
+                        leadingIcon = if (!isStreamMode) {
+                            { Icon(Icons.Outlined.Videocam, null, Modifier.size(18.dp)) }
+                        } else null
+                )
+                FilterChip(
+                        selected = isStreamMode,
+                        onClick = { viewModel.setMediaSourceType(ConfigManager.MEDIA_SOURCE_STREAM) },
+                        label = { Text(stringResource(R.string.settings_media_source_stream)) },
+                        leadingIcon = if (isStreamMode) {
+                            { Icon(Icons.Default.Link, null, Modifier.size(18.dp)) }
+                        } else null
+                )
+            }
+
+            // Stream-specific options (shown only in stream mode)
+            AnimatedVisibility(
+                    visible = isStreamMode,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+            ) {
+                Column {
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Stream URL input
+                    var urlText by remember(uiState.streamUrl) { mutableStateOf(uiState.streamUrl) }
+                    OutlinedTextField(
+                            value = urlText,
+                            onValueChange = { urlText = it },
+                            label = { Text(stringResource(R.string.settings_stream_url)) },
+                            placeholder = { Text(stringResource(R.string.settings_stream_url_hint)) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(start = 36.dp, end = 4.dp),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+                    )
+
+                    // Save button for URL (avoid saving on every keystroke)
+                    if (urlText != uiState.streamUrl) {
+                        TextButton(
+                                onClick = { viewModel.setStreamUrl(urlText) },
+                                modifier = Modifier.align(Alignment.End).padding(end = 4.dp)
+                        ) {
+                            Text(stringResource(R.string.positive))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    SettingsSwitchRow(
+                            icon = Icons.Default.Refresh,
+                            title = stringResource(R.string.settings_stream_auto_reconnect),
+                            subtitle = stringResource(R.string.settings_stream_auto_reconnect_desc),
+                            checked = uiState.streamAutoReconnect,
+                            onCheckedChange = { viewModel.setStreamAutoReconnect(it) }
+                    )
+
+                    SettingsDivider()
+
+                    SettingsSwitchRow(
+                            icon = Icons.Outlined.Videocam,
+                            title = stringResource(R.string.settings_stream_local_fallback),
+                            subtitle = stringResource(R.string.settings_stream_local_fallback_desc),
+                            checked = uiState.streamLocalFallback,
+                            onCheckedChange = { viewModel.setStreamLocalFallback(it) }
+                    )
+
+                    SettingsDivider()
+
+                    // Transport hint (auto/tcp/udp)
+                    Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                                imageVector = Icons.Default.SettingsInputAntenna,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(14.dp))
+                        Text(
+                                text = stringResource(R.string.settings_stream_transport_hint),
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Column(modifier = Modifier.padding(start = 40.dp)) {
+                        TransportOption(
+                                title = stringResource(R.string.settings_stream_transport_auto),
+                                selected = uiState.streamTransportHint == "auto",
+                                onClick = { viewModel.setStreamTransportHint("auto") }
+                        )
+                        TransportOption(
+                                title = stringResource(R.string.settings_stream_transport_tcp),
+                                selected = uiState.streamTransportHint == "tcp",
+                                onClick = { viewModel.setStreamTransportHint("tcp") }
+                        )
+                        TransportOption(
+                                title = stringResource(R.string.settings_stream_transport_udp),
+                                selected = uiState.streamTransportHint == "udp",
+                                onClick = { viewModel.setStreamTransportHint("udp") }
+                        )
+                    }
+
+                    SettingsDivider()
+
+                    // Timeout
+                    var timeoutText by remember(uiState.streamTimeoutMs) {
+                        mutableStateOf(uiState.streamTimeoutMs.toString())
+                    }
+                    Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                                imageVector = Icons.Default.Timer,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(14.dp))
+                        OutlinedTextField(
+                                value = timeoutText,
+                                onValueChange = { newVal ->
+                                    timeoutText = newVal
+                                    newVal.toLongOrNull()?.let { viewModel.setStreamTimeoutMs(it) }
+                                },
+                                label = { Text(stringResource(R.string.settings_stream_timeout)) },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                suffix = { Text("ms") }
+                        )
+                    }
+                }
+            }
         }
 
         // ==================== Advanced Settings ====================
@@ -441,6 +619,26 @@ private fun MicModeOption(
                     lineHeight = 15.sp
             )
         }
+    }
+}
+
+@Composable
+private fun TransportOption(title: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier =
+                    Modifier.fillMaxWidth()
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable(onClick = onClick)
+                            .padding(vertical = 4.dp)
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
+        )
     }
 }
 

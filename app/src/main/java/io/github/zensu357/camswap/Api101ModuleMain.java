@@ -2,7 +2,6 @@ package io.github.zensu357.camswap;
 
 import android.util.Log;
 
-import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,21 +35,9 @@ public class Api101ModuleMain extends XposedModule {
         }
 
         try {
-            if ("io.github.zensu357.camswap".equals(param.getPackageName())) {
-                hookModuleSelfCheck(param.getClassLoader());
-                return;
-            }
             new HookMain().handleLoadPackage(new Api101PackageContext(this, param));
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Hook package failed: " + param.getPackageName(), t);
         }
-    }
-
-    private void hookModuleSelfCheck(ClassLoader classLoader) throws Exception {
-        Class<?> activityClass = Class.forName("io.github.zensu357.camswap.MainActivity", false, classLoader);
-        Method method = activityClass.getDeclaredMethod("isModuleActive");
-        method.setAccessible(true);
-        hook(method).intercept(chain -> Boolean.TRUE);
-        LogUtil.log("【CS】已通过 API 101 原生链路 Hook MainActivity.isModuleActive");
     }
 }

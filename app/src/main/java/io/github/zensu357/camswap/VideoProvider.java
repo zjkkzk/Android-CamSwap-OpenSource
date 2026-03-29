@@ -236,6 +236,14 @@ public class VideoProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
+        if ("mark_active".equals(method)) {
+            getContext().getSharedPreferences("module_status", android.content.Context.MODE_PRIVATE)
+                    .edit()
+                    .putLong("last_active", System.currentTimeMillis())
+                    .apply();
+            return Bundle.EMPTY;
+        }
+
         configManager.reload();
         boolean changed = false;
 

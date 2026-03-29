@@ -39,8 +39,7 @@ import java.nio.ByteBuffer;
 import io.github.zensu357.camswap.utils.LogUtil;
 import io.github.zensu357.camswap.utils.VideoManager;
 
-import io.github.zensu357.camswap.api101.compat.XC_MethodHook;
-import io.github.zensu357.camswap.api101.compat.XposedHelpers;
+import io.github.zensu357.camswap.api101.Api101Runtime;
 
 /**
  * Handles Camera2 session interception: replaces real camera surfaces with
@@ -91,6 +90,9 @@ public final class Camera2SessionHook {
     private volatile long lastGlNullFallbackLogMs = 0L;
     /** 上一次 YUV 帧是否通过回退路径（视频文件截帧）生成 */
     private volatile boolean lastYuvFrameWasFallback = true;
+    /** YUV 帧率统计 */
+    private volatile int yuvFrameCount = 0;
+    private volatile long yuvFpsWindowStartMs = 0L;
     private final Map<ImageReader, YuvCallbackPump> whatsappYuvPumpMap = new ConcurrentHashMap<>();
     private HandlerThread whatsappYuvPumpThread;
     private Handler whatsappYuvPumpHandler;
@@ -98,6 +100,11 @@ public final class Camera2SessionHook {
     // Photo Fake: 等待 build() 时触发
     public volatile Surface pendingPhotoSurface;
     private volatile boolean bypassCurrentSession = false;
+    /** 标记正在释放资源，防止释放期间竞态创建新桥接 */
+    private volatile boolean isReleasing = false;
+
+    // Deferred playback: set when build() fires before addTarget()
+    volatile boolean pendingPlayback = false;
 
     // Virtual surface for session hijacking
     private Surface virtualSurface;
@@ -118,6 +125,24 @@ public final class Camera2SessionHook {
 
     /** Public accessor for Camera2Handler to check/redirect surfaces. */
     public Surface getVirtualSurface() {
+        return virtualSurface;
+    }
+
+    /** Mark virtual surface for recreation on next session creation. */
+    public void invalidateVirtualSurface() {
+        needRecreate = true;
+    }
+
+    /**
+     * Ensure the virtual surface exists. Called lazily from addTarget/session hooks
+     * in case onOpened hook didn't fire (ART optimization on obfuscated classes).
+     */
+    public Surface ensureVirtualSurface() {
+        if (virtualSurface == null || !virtualSurface.isValid()) {
+            needRecreate = true;
+            createVirtualSurface();
+            LogUtil.log("【CS】延迟创建虚拟 Surface（onOpened 未触发回退）");
+        }
         return virtualSurface;
     }
 
@@ -164,71 +189,139 @@ public final class Camera2SessionHook {
         if (!hookedStateCallbackClasses.add(hookedClass.getName())) {
             return;
         }
-        XposedHelpers.findAndHookMethod(hookedClass, "onOpened", CameraDevice.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                needRecreate = true;
-                createVirtualSurface();
-                playerManager.releaseCamera2Resources();
-                releaseImageWriters(false);
-                previewSurface1 = null;
-                readerSurface1 = null;
-                readerSurface = null;
-                previewSurface = null;
-                setBypassCurrentSession(false);
-                isFirstHookBuild = true;
-                LogUtil.log("【CS】打开相机C2");
 
-                File file = new File(VideoManager.getCurrentVideoPath());
-                boolean showToast = !VideoManager.getConfig().getBoolean(ConfigManager.KEY_DISABLE_TOAST, false);
-                if (!file.exists()) {
-                    if (HookMain.toast_content != null && showToast) {
-                        try {
-                            LogUtil.log("【CS】不存在替换视频: " + HookMain.toast_content.getPackageName()
-                                    + " 当前路径：" + VideoManager.video_path);
-                        } catch (Exception ee) {
-                            LogUtil.log("【CS】[toast]" + ee);
+        // onOpened
+        try {
+            Method m = resolveMethodOnClass(hookedClass, "onOpened", CameraDevice.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    isReleasing = false;
+                    needRecreate = true;
+                    createVirtualSurface();
+                    playerManager.releaseCamera2Resources();
+                    releaseImageWriters(false);
+                    previewSurface1 = null;
+                    readerSurface1 = null;
+                    readerSurface = null;
+                    previewSurface = null;
+                    pendingPlayback = false;
+                    captureBuilder = null;
+                    setBypassCurrentSession(false);
+                    isFirstHookBuild = true;
+                    LogUtil.log("【CS】打开相机C2");
+
+                    File file = new File(VideoManager.getCurrentVideoPath());
+                    // If video not found, provider may have started since init —
+                    // retry once before giving up
+                    if (!file.exists() && !VideoManager.isProviderAvailable()) {
+                        VideoManager.checkProviderAvailability();
+                        if (VideoManager.isProviderAvailable()) {
+                            VideoManager.getConfig().forceReload();
+                            VideoManager.updateVideoPath(false);
+                            file = new File(VideoManager.getCurrentVideoPath());
+                            LogUtil.log("【CS】onOpened 延迟获取 Provider 成功，视频路径: " + file.getAbsolutePath());
                         }
                     }
-                    return;
+                    boolean showToast = !VideoManager.getConfig().getBoolean(ConfigManager.KEY_DISABLE_TOAST, false);
+                    if (!file.exists()) {
+                        if (HookMain.toast_content != null && showToast) {
+                            try {
+                                LogUtil.log("【CS】不存在替换视频: " + HookMain.toast_content.getPackageName()
+                                        + " 当前路径：" + VideoManager.video_path);
+                            } catch (Exception ee) {
+                                LogUtil.log("【CS】[toast]" + ee);
+                            }
+                        }
+                        return chain.proceed(args);
+                    }
+
+                    hookAllCreateSessionVariants(args[0].getClass());
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onOpened before 异常: " + t);
                 }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onOpened 失败: " + t);
+        }
 
-                hookAllCreateSessionVariants(param.args[0].getClass());
-            }
-        });
+        // onClosed
+        try {
+            Method m = resolveMethodOnClass(hookedClass, "onClosed", CameraDevice.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】相机关闭 onClosed，释放播放器资源");
+                    setBypassCurrentSession(false);
+                    playerManager.releaseCamera2Resources();
+                    releaseImageWriters();
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onClosed before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onClosed 失败: " + t);
+        }
 
-        XposedHelpers.findAndHookMethod(hookedClass, "onClosed", CameraDevice.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                LogUtil.log("【CS】相机关闭 onClosed，释放播放器资源");
-                setBypassCurrentSession(false);
-                playerManager.releaseCamera2Resources();
-                releaseImageWriters();
-            }
-        });
+        // onError
+        try {
+            Method m = resolveMethodOnClass(hookedClass, "onError", CameraDevice.class, int.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】相机错误onerror：" + (int) args[1]);
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onError before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onError 失败: " + t);
+        }
 
-        XposedHelpers.findAndHookMethod(hookedClass, "onError", CameraDevice.class, int.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                LogUtil.log("【CS】相机错误onerror：" + (int) param.args[1]);
-            }
-        });
-
-        XposedHelpers.findAndHookMethod(hookedClass, "onDisconnected", CameraDevice.class, new XC_MethodHook() {
-            @Override
-            protected void beforeHookedMethod(MethodHookParam param) {
-                LogUtil.log("【CS】相机断开 onDisconnected，释放播放器资源");
-                setBypassCurrentSession(false);
-                playerManager.releaseCamera2Resources();
-                releaseImageWriters();
-            }
-        });
+        // onDisconnected
+        try {
+            Method m = resolveMethodOnClass(hookedClass, "onDisconnected", CameraDevice.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】相机断开 onDisconnected，释放播放器资源");
+                    setBypassCurrentSession(false);
+                    playerManager.releaseCamera2Resources();
+                    releaseImageWriters();
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onDisconnected before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onDisconnected 失败: " + t);
+        }
     }
 
     /** Start video playback on all current surfaces. */
     public void startPlayback() {
+        if (readerSurface == null && readerSurface1 == null
+                && previewSurface == null && previewSurface1 == null) {
+            LogUtil.log("【CS】延迟播放：所有 surface 为空，等待 addTarget");
+            pendingPlayback = true;
+            return;
+        }
+        pendingPlayback = false;
         playerManager.initCamera2Players(readerSurface, readerSurface1,
                 previewSurface, previewSurface1);
+
+        // WhatsApp 视频通话：预览渲染器旋转设为 0°，让本机自拍画面方向正确。
+        // YUV 截帧时通过 captureFrameWithRotation 单独应用 video_rotation_offset，
+        // 确保对方看到正确方向。
+        if (isWhatsAppPackage(getCurrentPackageName()) && !whatsappYuvPumpMap.isEmpty()) {
+            MediaPlayerManager pm = HookMain.playerManager;
+            if (pm.c2_renderer != null) pm.c2_renderer.setRotation(0);
+            if (pm.c2_renderer_1 != null) pm.c2_renderer_1.setRotation(0);
+            LogUtil.log("【CS】WhatsApp 视频通话：预览渲染器旋转已设为 0°");
+        }
     }
 
     public void registerImageReaderSurface(Surface surface, int format, int width, int height) {
@@ -343,6 +436,7 @@ public final class Camera2SessionHook {
             LogUtil.log("【CS】启用 WhatsApp YUV 会话旁路: " + reason);
         }
         setBypassCurrentSession(true);
+        pendingPlayback = false;
         previewSurface = null;
         previewSurface1 = null;
         readerSurface = null;
@@ -363,6 +457,10 @@ public final class Camera2SessionHook {
         } else if (!previewSurface.equals(surface) && previewSurface1 == null) {
             previewSurface1 = surface;
         }
+        if (pendingPlayback) {
+            LogUtil.log("【CS】addTarget 触发延迟播放 (preview)");
+            startPlayback();
+        }
     }
 
     public void rememberReaderPlaybackSurface(Surface surface) {
@@ -376,6 +474,10 @@ public final class Camera2SessionHook {
             readerSurface = surface;
         } else if (!readerSurface.equals(surface) && readerSurface1 == null) {
             readerSurface1 = surface;
+        }
+        if (pendingPlayback) {
+            LogUtil.log("【CS】addTarget 触发延迟播放 (reader)");
+            startPlayback();
         }
     }
 
@@ -420,6 +522,7 @@ public final class Camera2SessionHook {
                 virtualSurface = null;
             }
             virtualTexture = new SurfaceTexture(15);
+            virtualTexture.setDefaultBufferSize(1920, 1080);
             virtualSurface = new Surface(virtualTexture);
             needRecreate = false;
         } else {
@@ -543,150 +646,200 @@ public final class Camera2SessionHook {
     // Hook all createCaptureSession variants
     // =====================================================================
 
-    private void hookAllCreateSessionVariants(Class<?> deviceClass) {
+    void hookAllCreateSessionVariants(Class<?> deviceClass) {
         if (deviceClass == null) {
             return;
         }
         if (!hookedDeviceClasses.add(deviceClass.getName())) {
             return;
         }
+
         // 1. createCaptureSession(List, StateCallback, Handler)
-        XposedHelpers.findAndHookMethod(deviceClass, "createCaptureSession", List.class,
-                CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam p) {
-                        if (p.args[0] != null) {
-                            if (shouldBypassWhatsAppYuvSession((List<?>) p.args[0], getCurrentPackageName())) {
-                                enableSessionBypass("createCaptureSession(List)");
-                            } else {
-                                disableSessionBypass();
-                            }
-                            LogUtil.log("【CS】createCaptureSession创建捕获，原始:" + p.args[0] + "虚拟：" + virtualSurface);
-                            if (!isCurrentSessionBypassed()) {
-                                p.args[0] = rewriteSessionSurfaces((List<?>) p.args[0]);
-                            }
-                            if (p.args[1] != null)
-                                hookSessionCallback((CameraCaptureSession.StateCallback) p.args[1]);
+        try {
+            Method m = resolveMethodOnClass(deviceClass, "createCaptureSession",
+                    List.class, CameraCaptureSession.StateCallback.class, Handler.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    if (args[0] != null) {
+                        if (shouldBypassWhatsAppYuvSession((List<?>) args[0], getCurrentPackageName())) {
+                            enableSessionBypass("createCaptureSession(List)");
+                        } else {
+                            disableSessionBypass();
                         }
+                        LogUtil.log("【CS】createCaptureSession创建捕获，原始:" + args[0] + "虚拟：" + virtualSurface);
+                        if (!isCurrentSessionBypassed()) {
+                            args[0] = rewriteSessionSurfaces((List<?>) args[0]);
+                        }
+                        if (args[1] != null)
+                            hookSessionCallback((CameraCaptureSession.StateCallback) args[1]);
                     }
-                });
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】createCaptureSession(List) before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook createCaptureSession(List) 失败: " + t);
+        }
 
         // 2. createCaptureSessionByOutputConfigurations (API 24+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            XposedHelpers.findAndHookMethod(deviceClass,
-                    "createCaptureSessionByOutputConfigurations", List.class,
-                    CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args[0] != null) {
-                                if (shouldBypassWhatsAppYuvSession((List<?>) p.args[0], getCurrentPackageName())) {
-                                    enableSessionBypass("createCaptureSessionByOutputConfigurations");
-                                } else {
-                                    disableSessionBypass();
-                                }
-                                if (!isCurrentSessionBypassed()) {
-                                    p.args[0] = rewriteOutputConfigurations((List<?>) p.args[0]);
-                                }
-                                LogUtil.log("【CS】执行了createCaptureSessionByOutputConfigurations");
-                                if (p.args[1] != null)
-                                    hookSessionCallback((CameraCaptureSession.StateCallback) p.args[1]);
-                            }
-                        }
-                    });
-        }
-
-        // 3. createConstrainedHighSpeedCaptureSession
-        XposedHelpers.findAndHookMethod(deviceClass, "createConstrainedHighSpeedCaptureSession",
-                List.class, CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam p) {
-                        if (p.args[0] != null) {
-                            if (shouldBypassWhatsAppYuvSession((List<?>) p.args[0], getCurrentPackageName())) {
-                                enableSessionBypass("createConstrainedHighSpeedCaptureSession");
+            try {
+                Method m = resolveMethodOnClass(deviceClass,
+                        "createCaptureSessionByOutputConfigurations",
+                        List.class, CameraCaptureSession.StateCallback.class, Handler.class);
+                Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                    Object[] args = toArgs(chain.getArgs());
+                    try {
+                        if (args[0] != null) {
+                            if (shouldBypassWhatsAppYuvSession((List<?>) args[0], getCurrentPackageName())) {
+                                enableSessionBypass("createCaptureSessionByOutputConfigurations");
                             } else {
                                 disableSessionBypass();
                             }
                             if (!isCurrentSessionBypassed()) {
-                                p.args[0] = rewriteSessionSurfaces((List<?>) p.args[0]);
+                                args[0] = rewriteOutputConfigurations((List<?>) args[0]);
                             }
-                            LogUtil.log("【CS】执行了 createConstrainedHighSpeedCaptureSession");
-                            if (p.args[1] != null)
-                                hookSessionCallback((CameraCaptureSession.StateCallback) p.args[1]);
+                            LogUtil.log("【CS】执行了createCaptureSessionByOutputConfigurations");
+                            if (args[1] != null)
+                                hookSessionCallback((CameraCaptureSession.StateCallback) args[1]);
                         }
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】createCaptureSessionByOutputConfigurations before 异常: " + t);
                     }
+                    return chain.proceed(args);
                 });
+            } catch (Throwable t) {
+                LogUtil.log("【CS】Hook createCaptureSessionByOutputConfigurations 失败: " + t);
+            }
+        }
+
+        // 3. createConstrainedHighSpeedCaptureSession
+        try {
+            Method m = resolveMethodOnClass(deviceClass, "createConstrainedHighSpeedCaptureSession",
+                    List.class, CameraCaptureSession.StateCallback.class, Handler.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    if (args[0] != null) {
+                        if (shouldBypassWhatsAppYuvSession((List<?>) args[0], getCurrentPackageName())) {
+                            enableSessionBypass("createConstrainedHighSpeedCaptureSession");
+                        } else {
+                            disableSessionBypass();
+                        }
+                        if (!isCurrentSessionBypassed()) {
+                            args[0] = rewriteSessionSurfaces((List<?>) args[0]);
+                        }
+                        LogUtil.log("【CS】执行了 createConstrainedHighSpeedCaptureSession");
+                        if (args[1] != null)
+                            hookSessionCallback((CameraCaptureSession.StateCallback) args[1]);
+                    }
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】createConstrainedHighSpeedCaptureSession before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook createConstrainedHighSpeedCaptureSession 失败: " + t);
+        }
 
         // 4. createReprocessableCaptureSession (API 23+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            XposedHelpers.findAndHookMethod(deviceClass, "createReprocessableCaptureSession",
-                    InputConfiguration.class, List.class, CameraCaptureSession.StateCallback.class,
-                    Handler.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args[1] != null) {
-                                if (shouldBypassWhatsAppYuvSession((List<?>) p.args[1], getCurrentPackageName())) {
-                                    enableSessionBypass("createReprocessableCaptureSession");
-                                } else {
-                                    disableSessionBypass();
-                                }
-                                if (!isCurrentSessionBypassed()) {
-                                    p.args[1] = rewriteSessionSurfaces((List<?>) p.args[1]);
-                                }
-                                LogUtil.log("【CS】执行了 createReprocessableCaptureSession ");
-                                if (p.args[2] != null)
-                                    hookSessionCallback((CameraCaptureSession.StateCallback) p.args[2]);
+            try {
+                Method m = resolveMethodOnClass(deviceClass, "createReprocessableCaptureSession",
+                        InputConfiguration.class, List.class,
+                        CameraCaptureSession.StateCallback.class, Handler.class);
+                Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                    Object[] args = toArgs(chain.getArgs());
+                    try {
+                        if (args[1] != null) {
+                            if (shouldBypassWhatsAppYuvSession((List<?>) args[1], getCurrentPackageName())) {
+                                enableSessionBypass("createReprocessableCaptureSession");
+                            } else {
+                                disableSessionBypass();
                             }
+                            if (!isCurrentSessionBypassed()) {
+                                args[1] = rewriteSessionSurfaces((List<?>) args[1]);
+                            }
+                            LogUtil.log("【CS】执行了 createReprocessableCaptureSession ");
+                            if (args[2] != null)
+                                hookSessionCallback((CameraCaptureSession.StateCallback) args[2]);
                         }
-                    });
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】createReprocessableCaptureSession before 异常: " + t);
+                    }
+                    return chain.proceed(args);
+                });
+            } catch (Throwable t) {
+                LogUtil.log("【CS】Hook createReprocessableCaptureSession 失败: " + t);
+            }
         }
 
         // 5. createReprocessableCaptureSessionByConfigurations (API 24+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            XposedHelpers.findAndHookMethod(deviceClass,
-                    "createReprocessableCaptureSessionByConfigurations", InputConfiguration.class, List.class,
-                    CameraCaptureSession.StateCallback.class, Handler.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args[1] != null) {
-                                if (shouldBypassWhatsAppYuvSession((List<?>) p.args[1], getCurrentPackageName())) {
-                                    enableSessionBypass("createReprocessableCaptureSessionByConfigurations");
-                                } else {
-                                    disableSessionBypass();
-                                }
-                                if (!isCurrentSessionBypassed()) {
-                                    p.args[1] = rewriteOutputConfigurations((List<?>) p.args[1]);
-                                }
-                                LogUtil.log("【CS】执行了 createReprocessableCaptureSessionByConfigurations");
-                                if (p.args[2] != null)
-                                    hookSessionCallback((CameraCaptureSession.StateCallback) p.args[2]);
+            try {
+                Method m = resolveMethodOnClass(deviceClass,
+                        "createReprocessableCaptureSessionByConfigurations",
+                        InputConfiguration.class, List.class,
+                        CameraCaptureSession.StateCallback.class, Handler.class);
+                Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                    Object[] args = toArgs(chain.getArgs());
+                    try {
+                        if (args[1] != null) {
+                            if (shouldBypassWhatsAppYuvSession((List<?>) args[1], getCurrentPackageName())) {
+                                enableSessionBypass("createReprocessableCaptureSessionByConfigurations");
+                            } else {
+                                disableSessionBypass();
                             }
+                            if (!isCurrentSessionBypassed()) {
+                                args[1] = rewriteOutputConfigurations((List<?>) args[1]);
+                            }
+                            LogUtil.log("【CS】执行了 createReprocessableCaptureSessionByConfigurations");
+                            if (args[2] != null)
+                                hookSessionCallback((CameraCaptureSession.StateCallback) args[2]);
                         }
-                    });
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】createReprocessableCaptureSessionByConfigurations before 异常: " + t);
+                    }
+                    return chain.proceed(args);
+                });
+            } catch (Throwable t) {
+                LogUtil.log("【CS】Hook createReprocessableCaptureSessionByConfigurations 失败: " + t);
+            }
         }
 
         // 6. createCaptureSession(SessionConfiguration) (API 28+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            XposedHelpers.findAndHookMethod(deviceClass, "createCaptureSession",
-                    SessionConfiguration.class, new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            if (p.args[0] != null) {
-                                LogUtil.log("【CS】执行了 createCaptureSession (SessionConfiguration)");
-                                realSessionConfig = (SessionConfiguration) p.args[0];
-                                if (shouldBypassWhatsAppYuvSession(realSessionConfig.getOutputConfigurations(),
-                                        getCurrentPackageName())) {
-                                    enableSessionBypass("createCaptureSession(SessionConfiguration)");
-                                } else {
-                                    disableSessionBypass();
-                                }
-                                if (!isCurrentSessionBypassed()) {
-                                    fakeSessionConfig = rewriteSessionConfiguration(realSessionConfig);
-                                    p.args[0] = fakeSessionConfig;
-                                }
-                                hookSessionCallback(realSessionConfig.getStateCallback());
+            try {
+                Method m = resolveMethodOnClass(deviceClass, "createCaptureSession",
+                        SessionConfiguration.class);
+                Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                    Object[] args = toArgs(chain.getArgs());
+                    try {
+                        if (args[0] != null) {
+                            LogUtil.log("【CS】执行了 createCaptureSession (SessionConfiguration)");
+                            realSessionConfig = (SessionConfiguration) args[0];
+                            if (shouldBypassWhatsAppYuvSession(realSessionConfig.getOutputConfigurations(),
+                                    getCurrentPackageName())) {
+                                enableSessionBypass("createCaptureSession(SessionConfiguration)");
+                            } else {
+                                disableSessionBypass();
                             }
+                            if (!isCurrentSessionBypassed()) {
+                                fakeSessionConfig = rewriteSessionConfiguration(realSessionConfig);
+                                args[0] = fakeSessionConfig;
+                            }
+                            hookSessionCallback(realSessionConfig.getStateCallback());
                         }
-                    });
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】createCaptureSession(SessionConfiguration) before 异常: " + t);
+                    }
+                    return chain.proceed(args);
+                });
+            } catch (Throwable t) {
+                LogUtil.log("【CS】Hook createCaptureSession(SessionConfiguration) 失败: " + t);
+            }
         }
     }
 
@@ -700,28 +853,49 @@ public final class Camera2SessionHook {
         if (!hookedSessionCallbackClasses.add(cb.getClass().getName())) {
             return;
         }
-        XposedHelpers.findAndHookMethod(cb.getClass(), "onConfigureFailed", CameraCaptureSession.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam p) {
-                        LogUtil.log("【CS】onConfigureFailed ：" + p.args[0]);
-                    }
-                });
-        XposedHelpers.findAndHookMethod(cb.getClass(), "onConfigured", CameraCaptureSession.class,
-                new XC_MethodHook() {
-                    @Override
-                    protected void beforeHookedMethod(MethodHookParam p) {
-                        LogUtil.log("【CS】onConfigured ：" + p.args[0]);
-                    }
-                });
+        Class<?> cbClass = cb.getClass();
+
         try {
-            XposedHelpers.findAndHookMethod(cb.getClass(), "onClosed", CameraCaptureSession.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam p) {
-                            LogUtil.log("【CS】onClosed ：" + p.args[0]);
-                        }
-                    });
+            Method m = resolveMethodOnClass(cbClass, "onConfigureFailed", CameraCaptureSession.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】onConfigureFailed ：" + args[0]);
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onConfigureFailed before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onConfigureFailed 失败: " + t);
+        }
+
+        try {
+            Method m = resolveMethodOnClass(cbClass, "onConfigured", CameraCaptureSession.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】onConfigured ：" + args[0]);
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onConfigured before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
+        } catch (Throwable t) {
+            LogUtil.log("【CS】Hook onConfigured 失败: " + t);
+        }
+
+        try {
+            Method m = resolveMethodOnClass(cbClass, "onClosed", CameraCaptureSession.class);
+            Api101Runtime.requireModule().hook(m).intercept(chain -> {
+                Object[] args = toArgs(chain.getArgs());
+                try {
+                    LogUtil.log("【CS】onClosed ：" + args[0]);
+                } catch (Throwable t) {
+                    LogUtil.log("【CS】onClosed before 异常: " + t);
+                }
+                return chain.proceed(args);
+            });
         } catch (Throwable t) {
             LogUtil.log("【CS】Hook session onClosed 失败: " + t);
         }
@@ -733,6 +907,7 @@ public final class Camera2SessionHook {
 
     private void releaseImageWriters(boolean clearTrackedReaders) {
         if (clearTrackedReaders) {
+            isReleasing = true;
             stopAllWhatsAppYuvPumps();
         }
         for (ImageWriter writer : imageWriterMap.values()) {
@@ -829,8 +1004,55 @@ public final class Camera2SessionHook {
         }
     }
 
+    /**
+     * 在泵的后台线程上预刷新 YUV 缓存。
+     * 将重计算（GL 截帧 + RGB→YUV 转换）从 WhatsApp 的 handler 线程移到泵线程，
+     * 避免阻塞 WhatsApp UI 处理和挂断信号。
+     */
+    private void preRefreshYuvCache(YuvCallbackPump pump) {
+        if (isReleasing || pump == null || !pump.running) {
+            return;
+        }
+        try {
+            Surface targetSurface = pump.imageReader.getSurface();
+            if (targetSurface == null || !shouldKeepYuvReaderSurfaceForCurrentPackage(targetSurface)) {
+                return;
+            }
+            int width = pump.imageReader.getWidth();
+            int height = pump.imageReader.getHeight();
+            if (width <= 0 || height <= 0) {
+                int[] size = surfaceSizeMap.get(targetSurface);
+                if (size != null && size.length >= 2) {
+                    width = size[0];
+                    height = size[1];
+                }
+            }
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+
+            long now = SystemClock.elapsedRealtime();
+            CachedYuvFrame cached = cachedYuvFrameMap.get(targetSurface);
+            if (cached == null || cached.width != width || cached.height != height) {
+                cached = buildPlaceholderYuvFrame(width, height, now);
+                cachedYuvFrameMap.put(targetSurface, cached);
+            }
+            long refreshInterval = lastYuvFrameWasFallback
+                    ? YUV_CACHE_REFRESH_FALLBACK_MS
+                    : YUV_CACHE_REFRESH_GL_MS;
+            if (now - cached.generatedAtMs >= refreshInterval) {
+                CachedYuvFrame refreshed = buildCachedYuvFrame(targetSurface, width, height, now);
+                if (refreshed != null) {
+                    cachedYuvFrameMap.put(targetSurface, refreshed);
+                }
+            }
+        } catch (Throwable t) {
+            LogUtil.log("【CS】预刷新 YUV 缓存异常: " + t);
+        }
+    }
+
     private void dispatchWhatsAppYuvCallback(YuvCallbackPump pump) {
-        if (pump == null || !pump.running || pump.listener == null) {
+        if (pump == null || !pump.running || pump.listener == null || isReleasing) {
             return;
         }
         Runnable callback = new Runnable() {
@@ -856,7 +1078,7 @@ public final class Camera2SessionHook {
     }
 
     public Image acquireFakeWhatsAppYuvImage(Object imageReader, Surface targetSurface) {
-        if (targetSurface == null || !shouldKeepYuvReaderSurfaceForCurrentPackage(targetSurface)) {
+        if (isReleasing || targetSurface == null || !shouldKeepYuvReaderSurfaceForCurrentPackage(targetSurface)) {
             return null;
         }
         int width = 0;
@@ -880,25 +1102,11 @@ public final class Camera2SessionHook {
             return null;
         }
 
-        long now = SystemClock.elapsedRealtime();
+        // 缓存由泵线程 preRefreshYuvCache 预先刷新，这里只读取
         CachedYuvFrame cached = cachedYuvFrameMap.get(targetSurface);
         if (cached == null || cached.width != width || cached.height != height) {
-            cached = buildPlaceholderYuvFrame(width, height, now);
+            cached = buildPlaceholderYuvFrame(width, height, SystemClock.elapsedRealtime());
             cachedYuvFrameMap.put(targetSurface, cached);
-        }
-        // 根据上一帧是否走了回退路径来决定刷新间隔：
-        // - GL 截帧成功时用短间隔（66ms）保持流畅
-        // - 回退到 MediaMetadataRetriever 时用长间隔（1s），因为该操作非常慢（~700ms/帧），
-        // 频繁调用会阻塞泵线程导致帧率极低
-        long refreshInterval = lastYuvFrameWasFallback
-                ? YUV_CACHE_REFRESH_FALLBACK_MS
-                : YUV_CACHE_REFRESH_GL_MS;
-        if (now - cached.generatedAtMs >= refreshInterval) {
-            CachedYuvFrame refreshed = buildCachedYuvFrame(targetSurface, width, height, now);
-            if (refreshed != null) {
-                cached = refreshed;
-                cachedYuvFrameMap.put(targetSurface, cached);
-            }
         }
         try {
             FakeYuvBridge bridge = getOrCreateFakeYuvBridge(targetSurface, width, height);
@@ -971,7 +1179,7 @@ public final class Camera2SessionHook {
     }
 
     private CachedYuvFrame buildCachedYuvFrame(Surface targetSurface, int width, int height, long nowMs) {
-        Bitmap frame = captureFrameForStill(width, height);
+        Bitmap frame = captureFrameForYuv(width, height);
         if (frame == null) {
             return null;
         }
@@ -987,28 +1195,37 @@ public final class Camera2SessionHook {
             frame.getPixels(pixels, 0, width, 0, 0, width, height);
 
             byte[] yPlane = new byte[width * height];
-            byte[] uPlane = new byte[(width / 2) * (height / 2)];
-            byte[] vPlane = new byte[(width / 2) * (height / 2)];
+            int chromaWidth = width / 2;
+            int chromaHeight = height / 2;
+            byte[] uPlane = new byte[chromaWidth * chromaHeight];
+            byte[] vPlane = new byte[chromaWidth * chromaHeight];
 
-            for (int y = 0; y < height; y++) {
-                int pixelRowOffset = y * width;
-                int yRowOffset = y * width;
-                for (int x = 0; x < width; x++) {
-                    int pixel = pixels[pixelRowOffset + x];
+            // 单次遍历：同时计算 Y（全像素）和 UV（偶数行偶数列采样）
+            // 相比原来的双循环 + computeAverageUv 方法调用（每帧 ~23万次方法调用和数组分配），
+            // 大幅减少开销
+            for (int row = 0; row < height; row++) {
+                int rowOffset = row * width;
+                boolean isEvenRow = (row & 1) == 0;
+                int chromaRowBase = isEvenRow ? (row >> 1) * chromaWidth : -1;
+
+                for (int col = 0; col < width; col++) {
+                    int pixel = pixels[rowOffset + col];
                     int r = (pixel >> 16) & 0xff;
                     int g = (pixel >> 8) & 0xff;
                     int b = pixel & 0xff;
-                    yPlane[yRowOffset + x] = (byte) clampToByte(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
-                }
-            }
 
-            int chromaWidth = width / 2;
-            for (int y = 0; y < height; y += 2) {
-                for (int x = 0; x < width; x += 2) {
-                    int[] uv = computeAverageUv(pixels, width, height, x, y);
-                    int index = (y / 2) * chromaWidth + (x / 2);
-                    uPlane[index] = (byte) uv[0];
-                    vPlane[index] = (byte) uv[1];
+                    // Y
+                    int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                    yPlane[rowOffset + col] = (byte) (yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
+
+                    // UV：仅在偶数行偶数列采样（每 2x2 块左上角像素）
+                    if (isEvenRow && (col & 1) == 0) {
+                        int uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                        int vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                        int chromaIdx = chromaRowBase + (col >> 1);
+                        uPlane[chromaIdx] = (byte) (uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
+                        vPlane[chromaIdx] = (byte) (vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
+                    }
                 }
             }
 
@@ -1150,41 +1367,21 @@ public final class Camera2SessionHook {
         }, "CS-BridgeClose").start();
     }
 
-    private int[] computeAverageUv(int[] pixels, int width, int height, int startX, int startY) {
-        int sampleCount = 0;
-        int totalU = 0;
-        int totalV = 0;
-        for (int dy = 0; dy < 2; dy++) {
-            int y = startY + dy;
-            if (y >= height) {
-                continue;
-            }
-            for (int dx = 0; dx < 2; dx++) {
-                int x = startX + dx;
-                if (x >= width) {
-                    continue;
-                }
-                int pixel = pixels[y * width + x];
-                int r = (pixel >> 16) & 0xff;
-                int g = (pixel >> 8) & 0xff;
-                int b = pixel & 0xff;
-                totalU += clampToByte(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-                totalV += clampToByte(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
-                sampleCount++;
-            }
-        }
-        if (sampleCount == 0) {
-            return new int[] { 128, 128 };
-        }
-        return new int[] { totalU / sampleCount, totalV / sampleCount };
-    }
-
-    private int clampToByte(int value) {
-        return Math.max(0, Math.min(255, value));
-    }
-
     private void maybeLogWhatsAppYuvSuccess(int width, int height, long timestampNs) {
         long now = SystemClock.elapsedRealtime();
+        yuvFrameCount++;
+        // 每 5 秒输出一次实际帧率
+        if (yuvFpsWindowStartMs == 0L) {
+            yuvFpsWindowStartMs = now;
+            yuvFrameCount = 1;
+        } else if (now - yuvFpsWindowStartMs >= 5000L) {
+            float fps = yuvFrameCount * 1000f / (now - yuvFpsWindowStartMs);
+            LogUtil.log("【CS】WhatsApp YUV 实际帧率: " + String.format(Locale.US, "%.1f", fps)
+                    + " fps (" + yuvFrameCount + " frames / 5s)"
+                    + (lastYuvFrameWasFallback ? " [fallback]" : " [GL]"));
+            yuvFrameCount = 0;
+            yuvFpsWindowStartMs = now;
+        }
         if (now - lastWhatsAppYuvSuccessLogMs < 1000L) {
             return;
         }
@@ -1277,8 +1474,14 @@ public final class Camera2SessionHook {
                 if (!running || whatsappYuvPumpHandler == null) {
                     return;
                 }
+                long startMs = SystemClock.elapsedRealtime();
+                // 在泵线程上预刷新 YUV 缓存（重计算），不阻塞 WhatsApp 的 handler
+                preRefreshYuvCache(YuvCallbackPump.this);
+                // 分发轻量回调到 WhatsApp handler（仅读取缓存）
                 dispatchWhatsAppYuvCallback(YuvCallbackPump.this);
-                whatsappYuvPumpHandler.postDelayed(this, 66L);
+                long elapsed = SystemClock.elapsedRealtime() - startMs;
+                long delay = Math.max(10L, 66L - elapsed);
+                whatsappYuvPumpHandler.postDelayed(this, delay);
             }
         };
 
@@ -1338,7 +1541,30 @@ public final class Camera2SessionHook {
         return compressBitmapToJpeg(frame, maxBytes);
     }
 
+    /**
+     * 截取当前帧（使用渲染器当前旋转），用于 JPEG 拍照替换。
+     */
     private Bitmap captureFrameForStill(int targetWidth, int targetHeight) {
+        return captureFrameInternal(targetWidth, targetHeight, -1);
+    }
+
+    /**
+     * 截取当前帧并强制应用 video_rotation_offset 旋转，用于 WhatsApp YUV 帧生成。
+     * 预览渲染器旋转设为 0°（本机自拍画面方向正确），
+     * 但 YUV 帧需要 video_rotation_offset 旋转才能让对方看到正确方向。
+     */
+    private Bitmap captureFrameForYuv(int targetWidth, int targetHeight) {
+        int rotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+        return captureFrameInternal(targetWidth, targetHeight, rotation);
+    }
+
+    /**
+     * @param rotationOverride -1=使用渲染器当前旋转, >=0=临时覆盖指定角度
+     */
+    private Bitmap captureFrameInternal(int targetWidth, int targetHeight, int rotationOverride) {
+        if (isReleasing) {
+            return null;
+        }
         GLVideoRenderer activeRenderer = getActiveRenderer();
         if (activeRenderer != null) {
             int captureWidth = activeRenderer.getSurfaceWidth();
@@ -1348,7 +1574,8 @@ public final class Camera2SessionHook {
                 captureHeight = targetHeight;
             }
 
-            Bitmap frame = activeRenderer.captureFrame(captureWidth, captureHeight);
+            Bitmap frame = activeRenderer.captureFrameWithRotation(
+                    captureWidth, captureHeight, rotationOverride);
             if (frame != null) {
                 frame = fitBitmapToTargetAspect(frame, targetWidth, targetHeight);
                 if (!isBitmapMostlyBlack(frame)) {
@@ -1374,6 +1601,12 @@ public final class Camera2SessionHook {
     private String cachedRetrieverPath;
 
     private Bitmap captureFrameFromVideoFile(int targetWidth, int targetHeight) {
+        // Stream mode: MediaMetadataRetriever cannot work with network URLs.
+        // Return null to let caller use GL capture or last-frame cache.
+        if (VideoManager.isStreamMode()) {
+            LogUtil.log("【CS】流模式下跳过 MediaMetadataRetriever 截帧");
+            return null;
+        }
         try {
             String currentPath = VideoManager.getCurrentVideoPath();
             // 复用已有 retriever，只在路径变化时重新创建
@@ -1609,5 +1842,28 @@ public final class Camera2SessionHook {
         } catch (Exception e) {
             LogUtil.log("【CS】照片注入失败: " + e);
         }
+    }
+
+    // =====================================================================
+    // API 101 utilities
+    // =====================================================================
+
+    private static Method resolveMethodOnClass(Class<?> clazz, String methodName,
+            Class<?>... parameterTypes) throws NoSuchMethodException {
+        Class<?> current = clazz;
+        while (current != null) {
+            try {
+                Method m = current.getDeclaredMethod(methodName, parameterTypes);
+                m.setAccessible(true);
+                return m;
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(clazz.getName() + "#" + methodName);
+    }
+
+    private static Object[] toArgs(List<Object> args) {
+        return args.toArray(new Object[0]);
     }
 }

@@ -377,6 +377,24 @@ public class Camera1Handler implements ICameraHandler {
     }
 
     private byte[] buildJpegFromCurrentVideoFrame() {
+        // Stream mode: MediaMetadataRetriever cannot work with URLs.
+        // Try GL capture from renderer instead.
+        if (VideoManager.isStreamMode()) {
+            LogUtil.log("【CS】Camera1 流模式下跳过 MediaMetadataRetriever，尝试 GL 截帧");
+            android.graphics.Bitmap glFrame = captureFrameFromGlRenderer();
+            if (glFrame != null) {
+                try {
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                    glFrame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, bos);
+                    byte[] jpegData = bos.toByteArray();
+                    glFrame.recycle();
+                    return jpegData;
+                } catch (Exception e) {
+                    LogUtil.log("【CS】Camera1 GL 截帧 JPEG 转换失败: " + e);
+                }
+            }
+            return null;
+        }
         try {
             long currentPosMs = 0;
             if (HookMain.playerManager.mplayer1 != null && HookMain.playerManager.mplayer1.isPlaying()) {
@@ -426,6 +444,19 @@ public class Camera1Handler implements ICameraHandler {
         } catch (Exception e) {
             return new byte[0];
         }
+    }
+
+    private android.graphics.Bitmap captureFrameFromGlRenderer() {
+        GLVideoRenderer renderer = HookMain.playerManager.c1_renderer_holder;
+        if (renderer == null || !renderer.isInitialized()) {
+            renderer = HookMain.playerManager.c1_renderer_texture;
+        }
+        if (renderer != null && renderer.isInitialized()) {
+            int w = HookMain.mwidth > 0 ? HookMain.mwidth : 640;
+            int h = HookMain.mhight > 0 ? HookMain.mhight : 480;
+            return renderer.captureFrameWithRotation(w, h, -1);
+        }
+        return null;
     }
 
     private void hookSetDisplayOrientation(ClassLoader classLoader) {

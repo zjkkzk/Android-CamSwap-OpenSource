@@ -35,7 +35,7 @@ android {
         minSdk 26
         targetSdk 36
         versionCode versionCodeInt
-        versionName "2.4.${versionSuffix}"
+        versionName "2.5.${versionSuffix}"
         
         // Inject build time into BuildConfig
         buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
@@ -142,4 +142,14 @@ dependencies {
     
     // Preference
     implementation 'androidx.preference:preference-ktx:1.2.1'
+
+    // ExoPlayer (Media3) - network stream playback
+    implementation "androidx.media3:media3-exoplayer:1.6.0"
+    implementation "androidx.media3:media3-exoplayer-rtsp:1.6.0"
+    implementation "androidx.media3:media3-exoplayer-hls:1.6.0"
+    implementation "androidx.media3:media3-exoplayer-dash:1.6.0"
+    implementation "androidx.media3:media3-datasource:1.6.0"
+    // RTMP: media3-exoplayer-rtmp requires native libs and may not be available
+    // on all mirrors. RTMP is handled via reflection in ExoPlayerBackend with
+    // graceful fallback to ProgressiveMediaSource.
 }

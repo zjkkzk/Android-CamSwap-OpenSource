@@ -75,6 +75,10 @@ public class GLVideoRenderer implements SurfaceTexture.OnFrameAvailableListener 
     private FloatBuffer mVertexBuffer;
     private FloatBuffer mTexCoordBuffer;
 
+    // Reusable capture buffer (avoid per-frame allocation)
+    private ByteBuffer mCaptureBuffer;
+    private int mCaptureBufferSize;
+
     // Shader sources, vertices, and tex coords shared via GLHelper
 
     /**
@@ -141,6 +145,10 @@ public class GLVideoRenderer implements SurfaceTexture.OnFrameAvailableListener 
         mRotationDegrees = ((degrees % 360) + 360) % 360;
     }
 
+    public int getRotation() {
+        return mRotationDegrees;
+    }
+
     @Override
     public void onFrameAvailable(SurfaceTexture surfaceTexture) {
         if (mReleased || !mInitialized)
@@ -152,58 +160,7 @@ public class GLVideoRenderer implements SurfaceTexture.OnFrameAvailableListener 
         if (mReleased || !mInitialized)
             return;
         try {
-            if (!EGL14.eglMakeCurrent(mEGLDisplay, mEGLSurface, mEGLSurface, mEGLContext)) {
-                return;
-            }
-
-            mInputSurfaceTexture.updateTexImage();
-            mInputSurfaceTexture.getTransformMatrix(mSTMatrix);
-
-            // Update rotation matrix
-            if (mRotationDegrees == 0) {
-                Matrix.setIdentityM(mRotMatrix, 0);
-            } else {
-                Matrix.setRotateM(mRotMatrix, 0, -mRotationDegrees, 0, 0, 1.0f);
-            }
-
-            // Query surface dimensions for viewport
-            int[] width = new int[1];
-            int[] height = new int[1];
-            EGL14.eglQuerySurface(mEGLDisplay, mEGLSurface, EGL14.EGL_WIDTH, width, 0);
-            EGL14.eglQuerySurface(mEGLDisplay, mEGLSurface, EGL14.EGL_HEIGHT, height, 0);
-            if (width[0] > 0) {
-                mSurfaceWidth = width[0];
-            }
-            if (height[0] > 0) {
-                mSurfaceHeight = height[0];
-            }
-
-            // Set viewport to the EGL surface's actual dimensions
-            if (width[0] > 0 && height[0] > 0) {
-                GLES20.glViewport(0, 0, width[0], height[0]);
-            }
-
-            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-
-            GLES20.glUseProgram(mProgram);
-
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, mTextureId);
-
-            GLES20.glUniformMatrix4fv(muSTMatrixHandle, 1, false, mSTMatrix, 0);
-            GLES20.glUniformMatrix4fv(muRotMatrixHandle, 1, false, mRotMatrix, 0);
-
-            mVertexBuffer.position(0);
-            GLES20.glEnableVertexAttribArray(maPositionHandle);
-            GLES20.glVertexAttribPointer(maPositionHandle, 2, GLES20.GL_FLOAT, false, 0, mVertexBuffer);
-
-            mTexCoordBuffer.position(0);
-            GLES20.glEnableVertexAttribArray(maTextureHandle);
-            GLES20.glVertexAttribPointer(maTextureHandle, 2, GLES20.GL_FLOAT, false, 0, mTexCoordBuffer);
-
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-
+            renderToBackBuffer();
             EGL14.eglSwapBuffers(mEGLDisplay, mEGLSurface);
         } catch (Exception e) {
             LogUtil.log("【CS】【GL】" + mTag + " drawFrame 异常: " + e);
@@ -211,38 +168,117 @@ public class GLVideoRenderer implements SurfaceTexture.OnFrameAvailableListener 
     }
 
     /**
-     * 截取当前渲染帧为 Bitmap（线程安全，同步等待 GL 线程完成）。
-     * 在 GL 线程上执行 glReadPixels，通过 CountDownLatch 与调用线程同步。
+     * 渲染一帧到后缓冲（不调用 eglSwapBuffers）。
+     * drawFrame() 和 captureFrameRaw() 共用此方法。
+     */
+    private void renderToBackBuffer() {
+        if (!EGL14.eglMakeCurrent(mEGLDisplay, mEGLSurface, mEGLSurface, mEGLContext)) {
+            return;
+        }
+
+        mInputSurfaceTexture.updateTexImage();
+        mInputSurfaceTexture.getTransformMatrix(mSTMatrix);
+
+        // Update rotation matrix
+        if (mRotationDegrees == 0) {
+            Matrix.setIdentityM(mRotMatrix, 0);
+        } else {
+            Matrix.setRotateM(mRotMatrix, 0, -mRotationDegrees, 0, 0, 1.0f);
+        }
+
+        // Query surface dimensions for viewport
+        int[] width = new int[1];
+        int[] height = new int[1];
+        EGL14.eglQuerySurface(mEGLDisplay, mEGLSurface, EGL14.EGL_WIDTH, width, 0);
+        EGL14.eglQuerySurface(mEGLDisplay, mEGLSurface, EGL14.EGL_HEIGHT, height, 0);
+        if (width[0] > 0) {
+            mSurfaceWidth = width[0];
+        }
+        if (height[0] > 0) {
+            mSurfaceHeight = height[0];
+        }
+
+        // Set viewport to the EGL surface's actual dimensions
+        if (width[0] > 0 && height[0] > 0) {
+            GLES20.glViewport(0, 0, width[0], height[0]);
+        }
+
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+
+        GLES20.glUseProgram(mProgram);
+
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, mTextureId);
+
+        GLES20.glUniformMatrix4fv(muSTMatrixHandle, 1, false, mSTMatrix, 0);
+        GLES20.glUniformMatrix4fv(muRotMatrixHandle, 1, false, mRotMatrix, 0);
+
+        mVertexBuffer.position(0);
+        GLES20.glEnableVertexAttribArray(maPositionHandle);
+        GLES20.glVertexAttribPointer(maPositionHandle, 2, GLES20.GL_FLOAT, false, 0, mVertexBuffer);
+
+        mTexCoordBuffer.position(0);
+        GLES20.glEnableVertexAttribArray(maTextureHandle);
+        GLES20.glVertexAttribPointer(maTextureHandle, 2, GLES20.GL_FLOAT, false, 0, mTexCoordBuffer);
+
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    /**
+     * 截取当前渲染帧为 Bitmap（使用渲染器当前旋转角度）。
      */
     public Bitmap captureFrame(int width, int height) {
+        return captureFrameWithRotation(width, height, -1);
+    }
+
+    /**
+     * 截取当前帧并应用指定旋转角度（不影响预览 Surface）。
+     * 用于 WhatsApp YUV 帧生成：预览渲染器旋转为 0°（本机自拍正确），
+     * 但 YUV 截帧需要应用 video_rotation_offset 才能让对方看到正确方向。
+     *
+     * @param rotationDegrees 要应用的旋转角度，-1 表示使用渲染器当前旋转
+     */
+    public Bitmap captureFrameWithRotation(int width, int height, int rotationDegrees) {
         if (!isInitialized() || mReleased)
             return null;
         final Bitmap[] result = { null };
         CountDownLatch latch = new CountDownLatch(1);
         mGLHandler.post(() -> {
+            int savedRotation = mRotationDegrees;
             try {
-                // 1. 确保 EGL 上下文绑定
-                EGL14.eglMakeCurrent(mEGLDisplay, mEGLSurface, mEGLSurface, mEGLContext);
+                if (rotationDegrees >= 0) {
+                    mRotationDegrees = ((rotationDegrees % 360) + 360) % 360;
+                }
 
-                // 2. 重新绘制一帧（确保最新画面）
-                drawFrame();
+                // 渲染到后缓冲（不 swap，不影响预览显示）
+                renderToBackBuffer();
 
-                // 3. glReadPixels 读取帧
-                ByteBuffer buf = ByteBuffer.allocateDirect(width * height * 4);
-                buf.order(ByteOrder.nativeOrder());
-                GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf);
-                buf.rewind();
+                // 立即恢复旋转
+                mRotationDegrees = savedRotation;
+
+                int bufSize = width * height * 4;
+                if (mCaptureBuffer == null || mCaptureBufferSize != bufSize) {
+                    mCaptureBuffer = ByteBuffer.allocateDirect(bufSize);
+                    mCaptureBuffer.order(ByteOrder.nativeOrder());
+                    mCaptureBufferSize = bufSize;
+                }
+                mCaptureBuffer.clear();
+                GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, mCaptureBuffer);
+                mCaptureBuffer.rewind();
 
                 Bitmap bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-                bmp.copyPixelsFromBuffer(buf);
+                bmp.copyPixelsFromBuffer(mCaptureBuffer);
 
-                // 4. glReadPixels 输出的图像是上下颠倒的, 翻转
+                // glReadPixels 输出的图像是上下颠倒的, 翻转
                 android.graphics.Matrix matrix = new android.graphics.Matrix();
                 matrix.postScale(1, -1);
                 result[0] = Bitmap.createBitmap(bmp, 0, 0, width, height, matrix, true);
 
                 bmp.recycle();
+                // 不 swap — 不影响预览 Surface 的显示内容
             } catch (Exception e) {
+                mRotationDegrees = savedRotation;
                 LogUtil.log("【CS】【GL】captureFrame 失败: " + e);
             }
             latch.countDown();

@@ -139,6 +139,9 @@ public final class ConfigWatcher {
         String oldMode = config.getString(ConfigManager.KEY_REPLACE_MODE, ConfigManager.REPLACE_MODE_VIDEO);
         boolean oldFpd = config.getBoolean(ConfigManager.KEY_FORCE_PRIVATE_DIR, false);
         int oldRotation = config.getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+        // Stream config snapshots
+        String oldSourceType = config.getString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, ConfigManager.MEDIA_SOURCE_LOCAL);
+        String oldStreamUrl = config.getString(ConfigManager.KEY_STREAM_URL, "");
 
         config.updateConfigFromJSON(configJson);
 
@@ -148,11 +151,16 @@ public final class ConfigWatcher {
         String newMode = config.getString(ConfigManager.KEY_REPLACE_MODE, ConfigManager.REPLACE_MODE_VIDEO);
         boolean newFpd = config.getBoolean(ConfigManager.KEY_FORCE_PRIVATE_DIR, false);
         int newRotation = config.getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+        // Stream config new values
+        String newSourceType = config.getString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, ConfigManager.MEDIA_SOURCE_LOCAL);
+        String newStreamUrl = config.getString(ConfigManager.KEY_STREAM_URL, "");
 
         boolean mediaChanged = !oldVideo.equals(newVideo) ||
                 !oldImage.equals(newImage) ||
                 !oldMode.equals(newMode) ||
-                (oldFpd != newFpd);
+                (oldFpd != newFpd) ||
+                !oldSourceType.equals(newSourceType) ||
+                !oldStreamUrl.equals(newStreamUrl);
 
         if (mediaChanged) {
             // Handle Binder-based video file transfer

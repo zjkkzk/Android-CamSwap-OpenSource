@@ -7,6 +7,7 @@ import android.os.Bundle;
 
 import io.github.zensu357.camswap.ConfigManager;
 import io.github.zensu357.camswap.IpcContract;
+import io.github.zensu357.camswap.MediaSourceDescriptor;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -465,4 +466,65 @@ public class VideoManager {
         }
     }
 
+    // =====================================================================
+    // Stream / unified media source support
+    // =====================================================================
+
+    /** Whether current config is set to stream mode. */
+    public static boolean isStreamMode() {
+        ConfigManager config = getConfig();
+        String type = config.getString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, ConfigManager.MEDIA_SOURCE_LOCAL);
+        return ConfigManager.MEDIA_SOURCE_STREAM.equals(type);
+    }
+
+    /** Whether there is a usable media source (local file or stream URL). */
+    public static boolean hasUsableMediaSource() {
+        return getCurrentMediaSource().isValid();
+    }
+
+    /**
+     * Build a {@link MediaSourceDescriptor} from current config state.
+     * Local mode: uses existing video path logic.
+     * Stream mode: uses stream_url; falls back to local if URL empty and fallback enabled.
+     */
+    public static MediaSourceDescriptor getCurrentMediaSource() {
+        ConfigManager config = getConfig();
+        String sourceType = config.getString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, ConfigManager.MEDIA_SOURCE_LOCAL);
+
+        if (ConfigManager.MEDIA_SOURCE_STREAM.equals(sourceType)) {
+            String streamUrl = config.getString(ConfigManager.KEY_STREAM_URL, "");
+            boolean autoReconnect = config.getBoolean(ConfigManager.KEY_STREAM_AUTO_RECONNECT, true);
+            boolean localFallback = config.getBoolean(ConfigManager.KEY_STREAM_LOCAL_FALLBACK, true);
+            String transportHint = config.getString(ConfigManager.KEY_STREAM_TRANSPORT_HINT, "auto");
+            long timeoutMs = config.getLong(ConfigManager.KEY_STREAM_TIMEOUT_MS, 8000L);
+
+            if (streamUrl != null && !streamUrl.isEmpty()) {
+                return MediaSourceDescriptor.stream(streamUrl)
+                        .autoReconnect(autoReconnect)
+                        .enableLocalFallback(localFallback)
+                        .transportHint(transportHint)
+                        .timeoutMs(timeoutMs)
+                        .build();
+            }
+
+            // Stream URL is empty — fall back to local if enabled
+            if (localFallback) {
+                log("【CS】流地址为空，回退到本地视频");
+                return buildLocalDescriptor();
+            }
+
+            // No fallback: return an invalid stream descriptor
+            return MediaSourceDescriptor.stream("").build();
+        }
+
+        return buildLocalDescriptor();
+    }
+
+    private static MediaSourceDescriptor buildLocalDescriptor() {
+        String path = getCurrentVideoPath();
+        boolean useProvider = isProviderAvailable();
+        return MediaSourceDescriptor.localFile(path != null ? path : "")
+                .useProviderPfd(useProvider)
+                .build();
+    }
 }

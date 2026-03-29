@@ -282,5 +282,8 @@ app/src/test/java/com/example/camswap/ConfigManagerTest.java
 app/src/test/java/com/example/camswap/VideoProviderTest.java
 app/src/test/java/com/example/camswap/ConfigManagerTest.java
 app/src/test/java/com/example/camswap/VideoProviderTest.java
-API101_MIGRATION_PLAN.md
 REFACTOR_PLAN.md
+API101_MIGRATION_PLAN.md
+.claude/settings.local.json
+.project
+app/bin/build/generated/source/buildConfig/debug/io/github/zensu357/camswap/BuildConfig.class

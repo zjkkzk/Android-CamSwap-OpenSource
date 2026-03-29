@@ -30,7 +30,15 @@ data class MainUiState(
     val isXposedActive: Boolean = false,
     val targetAppsCount: Int = 0,
     val originalVideoName: String? = null,
-    val latestVersion: String? = null
+    val latestVersion: String? = null,
+
+    // Stream mode
+    val mediaSourceType: String = ConfigManager.MEDIA_SOURCE_LOCAL,
+    val streamUrl: String = "",
+    val streamAutoReconnect: Boolean = true,
+    val streamLocalFallback: Boolean = true,
+    val streamTransportHint: String = "auto",
+    val streamTimeoutMs: Long = 8000L
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -58,7 +66,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     enablePhotoFake = configManager.getBoolean(ConfigManager.KEY_ENABLE_PHOTO_FAKE, false),
                     notificationControlEnabled = configManager.getBoolean(ConfigManager.KEY_NOTIFICATION_CONTROL_ENABLED, false),
                     targetAppsCount = configManager.targetPackages.size,
-                    originalVideoName = configManager.getString(ConfigManager.KEY_ORIGINAL_VIDEO_NAME, null)
+                    originalVideoName = configManager.getString(ConfigManager.KEY_ORIGINAL_VIDEO_NAME, null),
+                    // Stream config
+                    mediaSourceType = configManager.getString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, ConfigManager.MEDIA_SOURCE_LOCAL),
+                    streamUrl = configManager.getString(ConfigManager.KEY_STREAM_URL, ""),
+                    streamAutoReconnect = configManager.getBoolean(ConfigManager.KEY_STREAM_AUTO_RECONNECT, true),
+                    streamLocalFallback = configManager.getBoolean(ConfigManager.KEY_STREAM_LOCAL_FALLBACK, true),
+                    streamTransportHint = configManager.getString(ConfigManager.KEY_STREAM_TRANSPORT_HINT, "auto"),
+                    streamTimeoutMs = configManager.getLong(ConfigManager.KEY_STREAM_TIMEOUT_MS, 8000L)
                 )
             }
         }
@@ -127,7 +142,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ---- Stream config setters ----
 
+    fun setMediaSourceType(type: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setString(ConfigManager.KEY_MEDIA_SOURCE_TYPE, type)
+            _uiState.update { it.copy(mediaSourceType = type) }
+        }
+    }
+
+    fun setStreamUrl(url: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setString(ConfigManager.KEY_STREAM_URL, url)
+            _uiState.update { it.copy(streamUrl = url) }
+        }
+    }
+
+    fun setStreamAutoReconnect(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setBoolean(ConfigManager.KEY_STREAM_AUTO_RECONNECT, enabled)
+            _uiState.update { it.copy(streamAutoReconnect = enabled) }
+        }
+    }
+
+    fun setStreamLocalFallback(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setBoolean(ConfigManager.KEY_STREAM_LOCAL_FALLBACK, enabled)
+            _uiState.update { it.copy(streamLocalFallback = enabled) }
+        }
+    }
+
+    fun setStreamTransportHint(hint: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setString(ConfigManager.KEY_STREAM_TRANSPORT_HINT, hint)
+            _uiState.update { it.copy(streamTransportHint = hint) }
+        }
+    }
+
+    fun setStreamTimeoutMs(timeout: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            configManager.setLong(ConfigManager.KEY_STREAM_TIMEOUT_MS, timeout)
+            _uiState.update { it.copy(streamTimeoutMs = timeout) }
+        }
+    }
 
     fun updatePermissionStatus(hasPermission: Boolean) {
         _uiState.update { it.copy(hasPermission = hasPermission) }
@@ -146,7 +203,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun checkLatestVersion() {
-        // 无网络权限，通过 LSPosed 托管更新
         _uiState.update { it.copy(latestVersion = null) }
     }
 }

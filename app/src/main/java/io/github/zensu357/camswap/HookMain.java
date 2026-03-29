@@ -227,6 +227,34 @@ public class HookMain {
                         }
 
                         PermissionHelper.checkAndSetupPaths(toast_content, packageName);
+
+                        // Notify CamSwap app that the module is active via ContentProvider
+                        try {
+                            toast_content.getContentResolver().call(
+                                    IpcContract.CONTENT_URI, "mark_active", null, null);
+                        } catch (Throwable ignored) {
+                        }
+
+                        // If provider is not available yet (CamSwap app not started),
+                        // schedule background retries so config/video become available
+                        // before the camera is actually opened.
+                        if (!VideoManager.isProviderAvailable()) {
+                            LogUtil.log("【CS】Provider 暂不可用，启动后台重试...");
+                            new Thread(() -> {
+                                for (int retry = 1; retry <= 5; retry++) {
+                                    try { Thread.sleep(2000); } catch (InterruptedException e) { break; }
+                                    VideoManager.checkProviderAvailability();
+                                    if (VideoManager.isProviderAvailable()) {
+                                        getConfig().forceReload();
+                                        VideoManager.updateVideoPath(false);
+                                        PermissionHelper.checkAndSetupPaths(toast_content, packageName);
+                                        LogUtil.log("【CS】延迟重试第" + retry + "次成功：Provider 已可用");
+                                        break;
+                                    }
+                                    LogUtil.log("【CS】延迟重试第" + retry + "次：Provider 仍不可用");
+                                }
+                            }, "CS-ProviderRetry").start();
+                        }
                     }
                 } catch (Throwable t) {
                     LogUtil.log("【CS】callApplicationOnCreate after 异常: " + t);

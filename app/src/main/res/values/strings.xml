@@ -137,6 +137,25 @@
     <!-- Manage Screen -->
     <string name="media_current_selection">当前选择</string>
 
+    <!-- Stream Mode -->
+    <string name="settings_category_stream">网络流设置</string>
+    <string name="settings_media_source_type">媒体源类型</string>
+    <string name="settings_media_source_local">本地文件</string>
+    <string name="settings_media_source_stream">网络流</string>
+    <string name="settings_stream_url">流地址</string>
+    <string name="settings_stream_url_hint">输入 rtsp:// rtmp:// http:// 等流地址</string>
+    <string name="settings_stream_auto_reconnect">自动重连</string>
+    <string name="settings_stream_auto_reconnect_desc">流断开后自动尝试重连</string>
+    <string name="settings_stream_local_fallback">本地兜底</string>
+    <string name="settings_stream_local_fallback_desc">流不可用时回退到本地视频</string>
+    <string name="settings_stream_transport_hint">RTSP 传输协议</string>
+    <string name="settings_stream_transport_auto">自动</string>
+    <string name="settings_stream_transport_tcp">TCP</string>
+    <string name="settings_stream_transport_udp">UDP</string>
+    <string name="settings_stream_timeout">连接超时</string>
+    <string name="settings_stream_timeout_desc">连接超时时间（毫秒）</string>
+    <string name="status_value_stream">网络流</string>
+
     <!-- Toast / Migration -->
     <string name="config_migrated">配置已自动迁移</string>
 </resources>

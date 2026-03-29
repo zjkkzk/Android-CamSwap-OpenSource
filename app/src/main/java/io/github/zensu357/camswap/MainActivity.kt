@@ -179,9 +179,11 @@ class MainActivity : ComponentActivity() {
         mainViewModel.updateXposedStatus(isModuleActive())
     }
 
-    // This method will be hooked by the Xposed module to return true
+    // The module (running in hooked target apps) calls VideoProvider.call("mark_active")
+    // which writes a timestamp to SharedPreferences. Check that here.
     private fun isModuleActive(): Boolean {
-        return false
+        val prefs = getSharedPreferences("module_status", MODE_PRIVATE)
+        return prefs.getLong("last_active", 0L) > 0L
     }
 
     private fun checkAndRequestPermissions() {
