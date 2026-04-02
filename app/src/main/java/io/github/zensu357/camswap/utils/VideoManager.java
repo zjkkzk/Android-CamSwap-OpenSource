@@ -24,6 +24,8 @@ public class VideoManager {
     private static boolean providerAvailable = false;
     private static Context toast_content;
     private static ConfigManager configManager;
+    private static long lastPfdFailLogMs = 0L;
+    private static long lastPfdSuccessLogMs = 0L;
 
     /** Supported video file extensions */
     private static final String[] VIDEO_EXTENSIONS = { ".mp4", ".mov", ".avi", ".mkv" };
@@ -101,13 +103,21 @@ public class VideoManager {
         try {
             ParcelFileDescriptor pfd = toast_content.getContentResolver().openFileDescriptor(IpcContract.URI_VIDEO, "r");
             if (pfd != null) {
-                log("【CS】getVideoPFD: 成功获取 PFD");
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (now - lastPfdSuccessLogMs >= 5000L) {
+                    lastPfdSuccessLogMs = now;
+                    log("【CS】getVideoPFD: 成功");
+                }
             } else {
-                log("【CS】getVideoPFD: openFileDescriptor 返回 null");
+                log("【CS】getVideoPFD: 返回 null");
             }
             return pfd;
         } catch (Exception e) {
-            log("【CS】getVideoPFD 失败: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - lastPfdFailLogMs >= 5000L) {
+                lastPfdFailLogMs = now;
+                log("【CS】getVideoPFD 失败: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
         }
         return null;
     }

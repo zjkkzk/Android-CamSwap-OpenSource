@@ -6,8 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -30,7 +28,6 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import io.github.libxposed.service.XposedService
-import io.github.libxposed.service.XposedServiceHelper
 import io.github.zensu357.camswap.ui.*
 import io.github.zensu357.camswap.ui.theme.CamSwapTheme
 import androidx.compose.ui.unit.dp
@@ -38,11 +35,10 @@ import androidx.compose.ui.unit.sp
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), App.ServiceStateListener {
 
     private val mainViewModel: MainViewModel by viewModels()
     private val mediaViewModel: MediaManagerViewModel by viewModels()
-    private var xposedService: XposedService? = null
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -90,31 +86,25 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Register XposedServiceHelper to detect module activation
-        XposedServiceHelper.registerListener(object : XposedServiceHelper.OnServiceListener {
-            override fun onServiceBind(service: XposedService) {
-                xposedService = service
-                mainViewModel.updateXposedStatus(true)
-            }
-
-            override fun onServiceDied(service: XposedService) {
-                xposedService = null
-                mainViewModel.updateXposedStatus(false)
-            }
-        })
-
-        // If service doesn't bind within 5s, consider module inactive
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (xposedService == null) {
-                mainViewModel.updateXposedStatus(false)
-            }
-        }, 5000)
-
         setContent {
             CamSwapTheme {
                 MainApp()
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        App.addServiceStateListener(this, true)
+    }
+
+    override fun onStop() {
+        App.removeServiceStateListener(this)
+        super.onStop()
+    }
+
+    override fun onServiceStateChanged(service: XposedService?) {
+        mainViewModel.updateXposedStatus(service != null)
     }
 
     @Composable

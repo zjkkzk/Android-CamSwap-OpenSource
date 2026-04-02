@@ -158,18 +158,14 @@ public class ConfigManager {
 
                 if (newConfig.length() > 0) {
                     configData = newConfig;
-                    io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置已通过 ContentProvider 重新加载: " + configData);
+                    io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置已通过 Provider 加载 (" + newConfig.length() + " keys)");
                     return true;
                 } else {
                     io.github.zensu357.camswap.utils.LogUtil
-                            .log("【CS】配置 Provider 返回的 Cursor 为空 (0 行), URI: " + uri + "，降级到文件读取");
-                    io.github.zensu357.camswap.utils.LogUtil
-                            .log("【CS】Reload trigger stack: " + android.util.Log.getStackTraceString(new Throwable()));
+                            .log("【CS】Provider Cursor 为空 (0 行), 降级到文件读取");
                 }
             } else {
-                io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置 Provider 返回的 Cursor 为空, URI: " + uri);
-                io.github.zensu357.camswap.utils.LogUtil
-                        .log("【CS】Reload trigger stack: " + android.util.Log.getStackTraceString(new Throwable()));
+                io.github.zensu357.camswap.utils.LogUtil.log("【CS】Provider Cursor 为空, 降级到文件读取");
             }
         } catch (Exception e) {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置 Provider 错误: " + e);
@@ -220,13 +216,12 @@ public class ConfigManager {
                     try {
                         final File finalVideoFile = videoFile;
                         android.os.Bundle bundle = new android.os.Bundle();
-                        io.github.zensu357.camswap.utils.LogUtil
-                                .log("【CS】准备附加 video_binder: " + finalVideoFile.getAbsolutePath());
+                        // attach video binder for private dir copy
                         bundle.putBinder(IpcContract.EXTRA_VIDEO_BINDER, new android.os.Binder() {
                             @Override
                             protected boolean onTransact(int code, android.os.Parcel data, android.os.Parcel reply,
                                     int flags) throws android.os.RemoteException {
-                                io.github.zensu357.camswap.utils.LogUtil.log("【CS】【Binder】收到 transact 请求, code=" + code);
+                                // Binder transact request
                                 if (code == 1) { // 1 = Get FD
                                     reply.writeNoException();
                                     try {
@@ -234,10 +229,9 @@ public class ConfigManager {
                                                 .open(finalVideoFile, android.os.ParcelFileDescriptor.MODE_READ_ONLY);
                                         reply.writeInt(1);
                                         pfd.writeToParcel(reply, android.os.Parcelable.PARCELABLE_WRITE_RETURN_VALUE);
-                                        io.github.zensu357.camswap.utils.LogUtil
-                                                .log("【CS】【Binder】成功将 ParcelFileDescriptor 写入 reply");
+                                        // PFD written to reply
                                     } catch (Exception e) {
-                                        io.github.zensu357.camswap.utils.LogUtil.log("【CS】【Binder】提取 PFD 失败: " + e);
+                                        io.github.zensu357.camswap.utils.LogUtil.log("【CS】Binder PFD 失败: " + e);
                                         reply.writeInt(0);
                                     }
                                     return true;
@@ -253,7 +247,7 @@ public class ConfigManager {
             }
 
             context.sendBroadcast(intent);
-            io.github.zensu357.camswap.utils.LogUtil.log("【CS】已广播当前配置 config broadcast sent");
+            io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置广播已发送");
         } catch (Exception e) {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】广播配置失败: " + e);
         }
@@ -281,16 +275,14 @@ public class ConfigManager {
                     configData = new JSONObject(stringBuilder.toString());
                     lastLoadedTime = (fileModTime > 0) ? fileModTime : System.currentTimeMillis();
                     io.github.zensu357.camswap.utils.LogUtil
-                            .log("【CS】Config reloaded from file: " + configFile.getAbsolutePath());
-                    io.github.zensu357.camswap.utils.LogUtil.log("【CS】File content: " + configData);
+                            .log("【CS】配置已从文件加载: " + configFile.getName());
                 } catch (Exception e) {
                     io.github.zensu357.camswap.utils.LogUtil.log("【CS】Config file read error: " + e);
                     if (configData == null)
                         configData = new JSONObject();
                 }
             } else {
-                io.github.zensu357.camswap.utils.LogUtil.log("【CS】Config file unchanged (modTime=" + fileModTime
-                        + " lastLoaded=" + lastLoadedTime + "), skip read");
+                // Config file unchanged, skip read
             }
         } else {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】Config file not found: " + configFile.getAbsolutePath());

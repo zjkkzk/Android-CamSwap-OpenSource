@@ -253,10 +253,12 @@ public class HookMain {
                                         getConfig().forceReload();
                                         VideoManager.updateVideoPath(false);
                                         PermissionHelper.checkAndSetupPaths(toast_content, packageName);
-                                        LogUtil.log("【CS】延迟重试第" + retry + "次成功：Provider 已可用");
+                                        LogUtil.log("【CS】Provider 重试第" + retry + "次成功");
                                         break;
                                     }
-                                    LogUtil.log("【CS】延迟重试第" + retry + "次：Provider 仍不可用");
+                                    if (retry == 5) {
+                                        LogUtil.log("【CS】Provider 重试 5 次均失败");
+                                    }
                                 }
                             }, "CS-ProviderRetry").start();
                         }
@@ -518,7 +520,7 @@ public class HookMain {
         if (args == null || args.length < 3) {
             return;
         }
-        LogUtil.log("【CS】应用创建了渲染器：宽：" + args[0] + " 高：" + args[1] + "格式" + args[2]);
+        LogUtil.log("【CS】ImageReader: " + args[0] + "x" + args[1] + " fmt=" + args[2]);
         c2_ori_width = (int) args[0];
         c2_ori_height = (int) args[1];
         imageReaderFormat = (int) args[2];
@@ -546,11 +548,7 @@ public class HookMain {
         int width = (int) args[0];
         int height = (int) args[1];
         int format = (int) args[2];
-        boolean alreadyTracked = camera2Hook.isTrackedReaderSurface(surface);
         camera2Hook.registerImageReaderSurface(surface, format, width, height);
-        if (!alreadyTracked) {
-            LogUtil.log("【CS】已记录 ImageReader Surface: " + surface + " format=" + format);
-        }
     }
 
     private void hookImageReaderListener(ClassLoader classLoader) {

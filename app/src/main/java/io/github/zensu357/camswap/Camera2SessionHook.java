@@ -52,9 +52,13 @@ public final class Camera2SessionHook {
      * YUV 帧缓存刷新间隔（毫秒）。
      * GL 渲染器可用时使用较短间隔以保持画面流畅；
      * 回退到 MediaMetadataRetriever 时自动使用较长间隔，避免阻塞泵线程。
+     * 高分辨率（>720p）使用更长间隔以避免 CPU 过载。
      */
     private static final long YUV_CACHE_REFRESH_GL_MS = 66L;
+    private static final long YUV_CACHE_REFRESH_GL_HIRES_MS = 133L;
     private static final long YUV_CACHE_REFRESH_FALLBACK_MS = 200L;
+    /** 高分辨率阈值：超过此像素数时使用低帧率泵 */
+    private static final int YUV_HIRES_PIXEL_THRESHOLD = 1280 * 720;
 
     private final MediaPlayerManager playerManager;
     private volatile String currentPackageName;
@@ -84,7 +88,6 @@ public final class Camera2SessionHook {
             .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private final Set<String> hookedSessionCallbackClasses = Collections
             .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
-    private volatile long lastWhatsAppYuvSuccessLogMs = 0L;
     private volatile long lastWhatsAppYuvPlaceholderLogMs = 0L;
     private volatile long lastNoGlRendererLogMs = 0L;
     private volatile long lastGlBlackFallbackLogMs = 0L;
@@ -100,6 +103,10 @@ public final class Camera2SessionHook {
     private Handler whatsappYuvPumpHandler;
 
     // Photo Fake: 等待 build() 时触发
+    /** YUV surfaces that were kept (not replaced) in the current session's OutputConfigurations. */
+    private final Set<Surface> sessionKeptYuvSurfaces = Collections
+            .newSetFromMap(new ConcurrentHashMap<Surface, Boolean>());
+
     public volatile Surface pendingPhotoSurface;
     private volatile boolean bypassCurrentSession = false;
     /** 标记正在释放资源，防止释放期间竞态创建新桥接 */
@@ -198,7 +205,7 @@ public final class Camera2SessionHook {
     }
 
     private boolean shouldUseYuvPumpForSurface(Surface surface) {
-        if (surface == null || !isYuvReaderSurface(surface) || isVoipActivity()) {
+        if (surface == null || !isYuvReaderSurface(surface)) {
             return false;
         }
         return isCurrentSessionYuvReaderSurface(surface);
@@ -429,7 +436,8 @@ public final class Camera2SessionHook {
         if (surface == null) {
             return false;
         }
-        return surface.equals(readerSurface) || surface.equals(readerSurface1);
+        return surface.equals(readerSurface) || surface.equals(readerSurface1)
+                || sessionKeptYuvSurfaces.contains(surface);
     }
 
     private boolean shouldDriveYuvBridgeNow() {
@@ -446,12 +454,11 @@ public final class Camera2SessionHook {
 
     private void maybeLogYuvKeepDecision(Surface surface, boolean keep) {
         long now = SystemClock.elapsedRealtime();
-        if (now - lastYuvKeepLogMs < 1000L) {
+        if (now - lastYuvKeepLogMs < 5000L) {
             return;
         }
         lastYuvKeepLogMs = now;
-        LogUtil.log("【CS】YUV keep 判定: pkg=" + getCurrentPackageName()
-                + " keep=" + keep + " surface=" + surface);
+        LogUtil.log("【CS】YUV keep: " + keep + " surface=" + surface);
     }
 
     public boolean shouldSkipImageReaderTracking() {
@@ -528,6 +535,7 @@ public final class Camera2SessionHook {
         previewSurface1 = null;
         readerSurface = null;
         readerSurface1 = null;
+        sessionKeptYuvSurfaces.clear();
         playerManager.releaseCamera2Resources();
     }
 
@@ -645,7 +653,7 @@ public final class Camera2SessionHook {
                 virtualSurface = createVirtualSurface();
             }
         }
-        LogUtil.log("【CS】【重建虚拟Surface】" + virtualSurface);
+        LogUtil.log("【CS】虚拟Surface已创建");
         return virtualSurface;
     }
 
@@ -675,7 +683,7 @@ public final class Camera2SessionHook {
                     Surface surface = (Surface) output;
                     if (shouldKeepYuvReaderSurfaceForPackage(surface, packageName)) {
                         rewritten.add(surface);
-                        LogUtil.log("【CS】Session 保留 YUV reader surface: " + surface);
+                        sessionKeptYuvSurfaces.add(surface);
                     } else {
                         rewritten.add(getSessionSurface(surface, packageName));
                     }
@@ -705,6 +713,7 @@ public final class Camera2SessionHook {
     private List<OutputConfiguration> rewriteOutputConfigurations(List<?> outputs, String packageName) {
         List<OutputConfiguration> rewritten = new ArrayList<>();
         boolean hasVirtualOutput = false;
+        sessionKeptYuvSurfaces.clear();
         if (outputs != null) {
             for (Object output : outputs) {
                 if (!(output instanceof OutputConfiguration)) {
@@ -716,6 +725,7 @@ public final class Camera2SessionHook {
                         || shouldKeepYuvReaderSurfaceForPackage(originalSurface, packageName)) {
                     rewritten.add(createOutputConfiguration(config, originalSurface));
                     if (shouldKeepYuvReaderSurfaceForPackage(originalSurface, packageName)) {
+                        sessionKeptYuvSurfaces.add(originalSurface);
                         LogUtil.log("【CS】OutputConfig 保留 YUV reader surface: " + originalSurface);
                     }
                 } else if (!hasVirtualOutput) {
@@ -785,7 +795,7 @@ public final class Camera2SessionHook {
                         } else {
                             disableSessionBypass();
                         }
-                        LogUtil.log("【CS】createCaptureSession创建捕获，原始:" + args[0] + "虚拟：" + virtualSurface);
+                        LogUtil.log("【CS】createCaptureSession(List) outputs=" + ((List<?>) args[0]).size());
                         if (!isCurrentSessionBypassed()) {
                             args[0] = rewriteSessionSurfaces((List<?>) args[0]);
                         }
@@ -823,7 +833,7 @@ public final class Camera2SessionHook {
                             if (!isCurrentSessionBypassed()) {
                                 args[0] = rewriteOutputConfigurations((List<?>) args[0]);
                             }
-                            LogUtil.log("【CS】执行了createCaptureSessionByOutputConfigurations");
+                            LogUtil.log("【CS】createCaptureSession(OutputConfigurations)");
                             if (args[1] != null)
                                 hookSessionCallback((CameraCaptureSession.StateCallback) args[1]);
                         }
@@ -857,7 +867,7 @@ public final class Camera2SessionHook {
                         if (!isCurrentSessionBypassed()) {
                             args[0] = rewriteSessionSurfaces((List<?>) args[0]);
                         }
-                        LogUtil.log("【CS】执行了 createConstrainedHighSpeedCaptureSession");
+                        LogUtil.log("【CS】createCaptureSession(HighSpeed)");
                         if (args[1] != null)
                             hookSessionCallback((CameraCaptureSession.StateCallback) args[1]);
                     }
@@ -892,7 +902,7 @@ public final class Camera2SessionHook {
                             if (!isCurrentSessionBypassed()) {
                                 args[1] = rewriteSessionSurfaces((List<?>) args[1]);
                             }
-                            LogUtil.log("【CS】执行了 createReprocessableCaptureSession ");
+                            LogUtil.log("【CS】createCaptureSession(Reprocessable)");
                             if (args[2] != null)
                                 hookSessionCallback((CameraCaptureSession.StateCallback) args[2]);
                         }
@@ -929,7 +939,7 @@ public final class Camera2SessionHook {
                             if (!isCurrentSessionBypassed()) {
                                 args[1] = rewriteOutputConfigurations((List<?>) args[1]);
                             }
-                            LogUtil.log("【CS】执行了 createReprocessableCaptureSessionByConfigurations");
+                            LogUtil.log("【CS】createCaptureSession(ReprocessableByConfigs)");
                             if (args[2] != null)
                                 hookSessionCallback((CameraCaptureSession.StateCallback) args[2]);
                         }
@@ -956,7 +966,7 @@ public final class Camera2SessionHook {
                                 yuvBridgeSessionReady = false;
                                 return chain.proceed(args);
                             }
-                            LogUtil.log("【CS】执行了 createCaptureSession (SessionConfiguration)");
+                            LogUtil.log("【CS】createCaptureSession(SessionConfig)");
                             realSessionConfig = (SessionConfiguration) args[0];
                             if (shouldBypassWhatsAppYuvSession(realSessionConfig.getOutputConfigurations(),
                                     getCurrentPackageName())) {
@@ -1064,6 +1074,7 @@ public final class Camera2SessionHook {
         bypassCurrentSession = false;
         closeFakeYuvBridges();
         internalFakeYuvReaderSurfaces.clear();
+        sessionKeptYuvSurfaces.clear();
         cachedYuvFrameMap.clear();
         releaseCachedRetriever();
         lastYuvFrameWasFallback = true;
@@ -1209,9 +1220,14 @@ public final class Camera2SessionHook {
                 cachedYuvFrameMap.put(targetSurface, cached);
                 needRefresh = true;
             }
-            long refreshInterval = lastYuvFrameWasFallback
-                    ? YUV_CACHE_REFRESH_FALLBACK_MS
-                    : YUV_CACHE_REFRESH_GL_MS;
+            long refreshInterval;
+            if (lastYuvFrameWasFallback) {
+                refreshInterval = YUV_CACHE_REFRESH_FALLBACK_MS;
+            } else if (width * height > YUV_HIRES_PIXEL_THRESHOLD) {
+                refreshInterval = YUV_CACHE_REFRESH_GL_HIRES_MS;
+            } else {
+                refreshInterval = YUV_CACHE_REFRESH_GL_MS;
+            }
             if (cached.isPlaceholder || now - cached.generatedAtMs >= refreshInterval || needRefresh) {
                 CachedYuvFrame refreshed = buildCachedYuvFrame(targetSurface, width, height, now);
                 if (refreshed != null) {
@@ -1283,9 +1299,14 @@ public final class Camera2SessionHook {
         // 缓存由泵线程 preRefreshYuvCache 预先刷新，这里只读取
         CachedYuvFrame cached = cachedYuvFrameMap.get(targetSurface);
         long now = SystemClock.elapsedRealtime();
-        long refreshInterval = lastYuvFrameWasFallback
-                ? YUV_CACHE_REFRESH_FALLBACK_MS
-                : YUV_CACHE_REFRESH_GL_MS;
+        long refreshInterval;
+        if (lastYuvFrameWasFallback) {
+            refreshInterval = YUV_CACHE_REFRESH_FALLBACK_MS;
+        } else if (width * height > YUV_HIRES_PIXEL_THRESHOLD) {
+            refreshInterval = YUV_CACHE_REFRESH_GL_HIRES_MS;
+        } else {
+            refreshInterval = YUV_CACHE_REFRESH_GL_MS;
+        }
         boolean needRefresh = cached == null
                 || cached.width != width
                 || cached.height != height
@@ -1374,6 +1395,30 @@ public final class Camera2SessionHook {
         }
     }
 
+    // Reusable buffers for YUV frame building — avoid per-frame allocation
+    private int[] reusablePixelBuf;
+    private int reusablePixelBufSize;
+    private byte[] reusableYPlane;
+    private byte[] reusableUPlane;
+    private byte[] reusableVPlane;
+    private int reusablePlaneW;
+    private int reusablePlaneH;
+
+    private void ensureReusableBuffers(int width, int height) {
+        int pixelCount = width * height;
+        if (reusablePixelBuf == null || reusablePixelBufSize < pixelCount) {
+            reusablePixelBuf = new int[pixelCount];
+            reusablePixelBufSize = pixelCount;
+        }
+        if (reusableYPlane == null || reusablePlaneW != width || reusablePlaneH != height) {
+            reusableYPlane = new byte[pixelCount];
+            reusableUPlane = new byte[(width / 2) * (height / 2)];
+            reusableVPlane = new byte[(width / 2) * (height / 2)];
+            reusablePlaneW = width;
+            reusablePlaneH = height;
+        }
+    }
+
     private CachedYuvFrame buildCachedYuvFrame(Surface targetSurface, int width, int height, long nowMs) {
         Bitmap frame = captureFrameForYuv(width, height);
         if (frame == null) {
@@ -1387,45 +1432,47 @@ public final class Camera2SessionHook {
                     frame = scaled;
                 }
             }
-            int[] pixels = new int[width * height];
-            frame.getPixels(pixels, 0, width, 0, 0, width, height);
+            ensureReusableBuffers(width, height);
+            frame.getPixels(reusablePixelBuf, 0, width, 0, 0, width, height);
 
-            byte[] yPlane = new byte[width * height];
             int chromaWidth = width / 2;
             int chromaHeight = height / 2;
-            byte[] uPlane = new byte[chromaWidth * chromaHeight];
-            byte[] vPlane = new byte[chromaWidth * chromaHeight];
 
-            // 单次遍历：同时计算 Y（全像素）和 UV（偶数行偶数列采样）
-            // 相比原来的双循环 + computeAverageUv 方法调用（每帧 ~23万次方法调用和数组分配），
-            // 大幅减少开销
             for (int row = 0; row < height; row++) {
                 int rowOffset = row * width;
                 boolean isEvenRow = (row & 1) == 0;
                 int chromaRowBase = isEvenRow ? (row >> 1) * chromaWidth : -1;
 
                 for (int col = 0; col < width; col++) {
-                    int pixel = pixels[rowOffset + col];
+                    int pixel = reusablePixelBuf[rowOffset + col];
                     int r = (pixel >> 16) & 0xff;
                     int g = (pixel >> 8) & 0xff;
                     int b = pixel & 0xff;
 
-                    // Y
                     int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                    yPlane[rowOffset + col] = (byte) (yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
+                    reusableYPlane[rowOffset + col] = (byte) (yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
 
-                    // UV：仅在偶数行偶数列采样（每 2x2 块左上角像素）
                     if (isEvenRow && (col & 1) == 0) {
                         int uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
                         int vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
                         int chromaIdx = chromaRowBase + (col >> 1);
-                        uPlane[chromaIdx] = (byte) (uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
-                        vPlane[chromaIdx] = (byte) (vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
+                        reusableUPlane[chromaIdx] = (byte) (uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
+                        reusableVPlane[chromaIdx] = (byte) (vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
                     }
                 }
             }
 
-            return new CachedYuvFrame(width, height, yPlane, uPlane, vPlane, nowMs, System.nanoTime(), false);
+            // Copy to new arrays for the cached frame (buffer reuse across builds, not across cache reads)
+            int yLen = width * height;
+            int cLen = chromaWidth * chromaHeight;
+            byte[] yOut = new byte[yLen];
+            byte[] uOut = new byte[cLen];
+            byte[] vOut = new byte[cLen];
+            System.arraycopy(reusableYPlane, 0, yOut, 0, yLen);
+            System.arraycopy(reusableUPlane, 0, uOut, 0, cLen);
+            System.arraycopy(reusableVPlane, 0, vOut, 0, cLen);
+
+            return new CachedYuvFrame(width, height, yOut, uOut, vOut, nowMs, System.nanoTime(), false);
         } finally {
             frame.recycle();
         }
@@ -1471,23 +1518,47 @@ public final class Camera2SessionHook {
         int vRowStride = planes[2].getRowStride();
         int vPixelStride = planes[2].getPixelStride();
 
-        for (int y = 0; y < height; y++) {
-            int yRowOffset = y * yRowStride;
-            int sourceRowOffset = y * width;
-            for (int x = 0; x < width; x++) {
-                yBuffer.put(yRowOffset + x * yPixelStride, cached.yPlane[sourceRowOffset + x]);
+        // Fast path: bulk copy when row stride matches width and pixel stride is 1
+        // (common case for our internally-created ImageReader bridge)
+        if (yPixelStride == 1 && yRowStride == width) {
+            yBuffer.put(cached.yPlane, 0, width * height);
+        } else {
+            for (int y = 0; y < height; y++) {
+                int yRowOffset = y * yRowStride;
+                int sourceRowOffset = y * width;
+                if (yPixelStride == 1) {
+                    yBuffer.position(yRowOffset);
+                    yBuffer.put(cached.yPlane, sourceRowOffset, width);
+                } else {
+                    for (int x = 0; x < width; x++) {
+                        yBuffer.put(yRowOffset + x * yPixelStride, cached.yPlane[sourceRowOffset + x]);
+                    }
+                }
             }
         }
 
         int chromaWidth = width / 2;
         int chromaHeight = height / 2;
-        for (int y = 0; y < chromaHeight; y++) {
-            int uRowOffset = y * uRowStride;
-            int vRowOffset = y * vRowStride;
-            int sourceRowOffset = y * chromaWidth;
-            for (int x = 0; x < chromaWidth; x++) {
-                uBuffer.put(uRowOffset + x * uPixelStride, cached.uPlane[sourceRowOffset + x]);
-                vBuffer.put(vRowOffset + x * vPixelStride, cached.vPlane[sourceRowOffset + x]);
+        if (uPixelStride == 1 && uRowStride == chromaWidth
+                && vPixelStride == 1 && vRowStride == chromaWidth) {
+            uBuffer.put(cached.uPlane, 0, chromaWidth * chromaHeight);
+            vBuffer.put(cached.vPlane, 0, chromaWidth * chromaHeight);
+        } else {
+            for (int y = 0; y < chromaHeight; y++) {
+                int uRowOffset = y * uRowStride;
+                int vRowOffset = y * vRowStride;
+                int sourceRowOffset = y * chromaWidth;
+                if (uPixelStride == 1 && vPixelStride == 1) {
+                    uBuffer.position(uRowOffset);
+                    uBuffer.put(cached.uPlane, sourceRowOffset, chromaWidth);
+                    vBuffer.position(vRowOffset);
+                    vBuffer.put(cached.vPlane, sourceRowOffset, chromaWidth);
+                } else {
+                    for (int x = 0; x < chromaWidth; x++) {
+                        uBuffer.put(uRowOffset + x * uPixelStride, cached.uPlane[sourceRowOffset + x]);
+                        vBuffer.put(vRowOffset + x * vPixelStride, cached.vPlane[sourceRowOffset + x]);
+                    }
+                }
             }
         }
     }
@@ -1566,59 +1637,53 @@ public final class Camera2SessionHook {
     private void maybeLogWhatsAppYuvSuccess(int width, int height, long timestampNs) {
         long now = SystemClock.elapsedRealtime();
         yuvFrameCount++;
-        // 每 5 秒输出一次实际帧率
         if (yuvFpsWindowStartMs == 0L) {
             yuvFpsWindowStartMs = now;
             yuvFrameCount = 1;
         } else if (now - yuvFpsWindowStartMs >= 5000L) {
             float fps = yuvFrameCount * 1000f / (now - yuvFpsWindowStartMs);
-            LogUtil.log("【CS】YUV 实际帧率: " + String.format(Locale.US, "%.1f", fps)
-                    + " fps (" + yuvFrameCount + " frames / 5s)"
+            LogUtil.log("【CS】YUV " + width + "x" + height
+                    + " " + String.format(Locale.US, "%.1f", fps) + "fps"
                     + (lastYuvFrameWasFallback ? " [fallback]" : " [GL]"));
             yuvFrameCount = 0;
             yuvFpsWindowStartMs = now;
         }
-        if (now - lastWhatsAppYuvSuccessLogMs < 1000L) {
-            return;
-        }
-        lastWhatsAppYuvSuccessLogMs = now;
-        LogUtil.log("【CS】YUV 伪帧已生成: " + width + "x" + height + " ts=" + timestampNs);
     }
 
     private void maybeLogWhatsAppYuvPlaceholder(int width, int height) {
         long now = SystemClock.elapsedRealtime();
-        if (now - lastWhatsAppYuvPlaceholderLogMs < 1000L) {
+        if (now - lastWhatsAppYuvPlaceholderLogMs < 5000L) {
             return;
         }
         lastWhatsAppYuvPlaceholderLogMs = now;
-        LogUtil.log("【CS】YUV 使用占位帧启动: " + width + "x" + height);
+        LogUtil.log("【CS】YUV 占位帧: " + width + "x" + height);
     }
 
     private void maybeLogNoGlRendererFallback() {
         long now = SystemClock.elapsedRealtime();
-        if (now - lastNoGlRendererLogMs < 1000L) {
+        if (now - lastNoGlRendererLogMs < 5000L) {
             return;
         }
         lastNoGlRendererLogMs = now;
-        LogUtil.log("【CS】无可用 GL 渲染器，回退到视频文件截帧");
+        LogUtil.log("【CS】YUV fallback: 无 GL 渲染器");
     }
 
     private void maybeLogGlNullFallback() {
         long now = SystemClock.elapsedRealtime();
-        if (now - lastGlNullFallbackLogMs < 1000L) {
+        if (now - lastGlNullFallbackLogMs < 5000L) {
             return;
         }
         lastGlNullFallbackLogMs = now;
-        LogUtil.log("【CS】GL 截帧返回 null，回退到视频文件截帧");
+        LogUtil.log("【CS】YUV fallback: GL 截帧返回 null");
     }
 
     private void maybeLogGlBlackFallback() {
         long now = SystemClock.elapsedRealtime();
-        if (now - lastGlBlackFallbackLogMs < 1000L) {
+        if (now - lastGlBlackFallbackLogMs < 5000L) {
             return;
         }
         lastGlBlackFallbackLogMs = now;
-        LogUtil.log("【CS】GL 截帧过黑，回退到视频文件截帧");
+        LogUtil.log("【CS】YUV fallback: GL 截帧过黑");
     }
 
     private static final class CachedYuvFrame {
@@ -1671,12 +1736,12 @@ public final class Camera2SessionHook {
                     return;
                 }
                 long startMs = SystemClock.elapsedRealtime();
-                // 在泵线程上预刷新 YUV 缓存（重计算），不阻塞 WhatsApp 的 handler
                 preRefreshYuvCache(YuvCallbackPump.this);
-                // 分发轻量回调到 WhatsApp handler（仅读取缓存）
                 dispatchWhatsAppYuvCallback(YuvCallbackPump.this);
                 long elapsed = SystemClock.elapsedRealtime() - startMs;
-                long delay = Math.max(10L, 66L - elapsed);
+                int pixels = imageReader.getWidth() * imageReader.getHeight();
+                long targetMs = pixels > YUV_HIRES_PIXEL_THRESHOLD ? 133L : 66L;
+                long delay = Math.max(16L, targetMs - elapsed);
                 whatsappYuvPumpHandler.postDelayed(this, delay);
             }
         };

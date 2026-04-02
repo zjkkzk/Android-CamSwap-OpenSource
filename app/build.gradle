@@ -1,7 +1,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
-    id 'org.jetbrains.kotlin.plugin.compose' version '2.2.0'
+    id 'org.jetbrains.kotlin.plugin.compose' version '2.1.0'
 }
 
 android {
@@ -14,7 +14,7 @@ android {
     def buildTime = date.format('yyyy-MM-dd HH:mm:ss')
     def versionSuffix = date.format('MMddHHmm')
     def versionCodeInt = date.format('yyMMddHH').toInteger()
-    
+
     signingConfigs {
         release {
             Properties properties = new Properties()
@@ -36,8 +36,8 @@ android {
         minSdk 26
         targetSdk 36
         versionCode versionCodeInt
-        versionName "2.5.${versionSuffix}"
-        
+        versionName "2.6.${versionSuffix}"
+
         // Inject build time into BuildConfig
         buildConfigField "String", "BUILD_TIME", "\"${buildTime}\""
 
@@ -55,7 +55,7 @@ android {
         buildConfig = true
         compose true
     }
-    
+
     // Compose compiler is now managed by org.jetbrains.kotlin.plugin.compose
 
     packaging {
@@ -75,8 +75,8 @@ android {
             } else {
                 signingConfig signingConfigs.debug
             }
-            minifyEnabled true
-            shrinkResources true
+            minifyEnabled false
+            shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
@@ -108,14 +108,14 @@ android {
 dependencies {
     compileOnly 'io.github.libxposed:api:101.0.0'
     implementation 'io.github.libxposed:service:101.0.0'
-    
+
     // Core Dependencies
     implementation 'androidx.core:core-ktx:1.10.1'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.6.1'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.6.1'
     implementation 'androidx.activity:activity-compose:1.7.0'
     implementation 'androidx.navigation:navigation-compose:2.7.5'
-    
+
     // Compose Dependencies
     implementation platform('androidx.compose:compose-bom:2023.08.00')
     implementation 'androidx.compose.ui:ui'
@@ -139,7 +139,7 @@ dependencies {
     // Coil for image loading and video thumbnails
     implementation 'io.coil-kt:coil-compose:2.5.0'
     implementation 'io.coil-kt:coil-video:2.5.0'
-    
+
     // Preference
     implementation 'androidx.preference:preference-ktx:1.2.1'
 
