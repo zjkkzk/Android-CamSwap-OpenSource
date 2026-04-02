@@ -153,7 +153,8 @@ public class Camera2Handler implements ICameraHandler {
 
                     Surface originalSurface = (Surface) args[0];
                     if (HookMain.camera2Hook.shouldKeepYuvReaderSurfaceForCurrentPackage(originalSurface)) {
-                        LogUtil.log("【CS】WhatsApp YUV ImageReader 目标保留原始输出: " + originalSurface);
+                        LogUtil.log("【CS】YUV ImageReader 目标保留原始输出: "
+                                + packageName + " -> " + originalSurface);
                         return chain.proceed(args);
                     }
                     if (HookMain.camera2Hook.isTrackedReaderSurface(originalSurface)) {

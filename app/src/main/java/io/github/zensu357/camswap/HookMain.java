@@ -1,5 +1,6 @@
 package io.github.zensu357.camswap;
 
+import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
 import android.graphics.SurfaceTexture;
@@ -11,6 +12,7 @@ import android.hardware.camera2.CaptureRequest;
 import android.media.Image;
 import android.media.ImageReader;
 import android.os.Build;
+import android.os.Bundle;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 
@@ -19,6 +21,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executor;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.zensu357.camswap.api101.Api101Runtime;
@@ -30,6 +33,13 @@ import io.github.zensu357.camswap.utils.LogUtil;
 public class HookMain {
     public static final MediaPlayerManager playerManager = new MediaPlayerManager();
     public static final Camera2SessionHook camera2Hook = new Camera2SessionHook(playerManager);
+    private static volatile boolean activityLifecycleRegistered = false;
+    private final ThreadLocal<Integer> imageReaderNewInstanceHookDepth = new ThreadLocal<Integer>() {
+        @Override
+        protected Integer initialValue() {
+            return 0;
+        }
+    };
 
     // Camera1 shared state
     public static Surface mSurface;
@@ -143,7 +153,7 @@ public class HookMain {
 
     public void handleLoadPackage(final Api101PackageContext packageContext) throws Exception {
         final ClassLoader classLoader = packageContext.classLoader;
-        final String packageName = packageContext.packageName;
+        final String packageName = packageContext.hostPackageName;
         // Check if module is disabled
         if (getConfig().getBoolean(ConfigManager.KEY_DISABLE_MODULE, false)) {
             LogUtil.log("【CS】模块已被配置禁用");
@@ -208,7 +218,9 @@ public class HookMain {
                 Object result = chain.proceed(args);
                 try {
                     if (args.length > 0 && args[0] instanceof Application) {
-                        toast_content = ((Application) args[0]).getApplicationContext();
+                        Application application = (Application) args[0];
+                        registerActivityLifecycleCallbacks(application);
+                        toast_content = application.getApplicationContext();
                         VideoManager.setContext(toast_content);
                         checkProviderAvailability();
 
@@ -259,11 +271,57 @@ public class HookMain {
         }
     }
 
+    private void registerActivityLifecycleCallbacks(Application application) {
+        if (application == null || activityLifecycleRegistered) {
+            return;
+        }
+        activityLifecycleRegistered = true;
+        try {
+            application.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                @Override
+                public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
+                }
+
+                @Override
+                public void onActivityStarted(Activity activity) {
+                }
+
+                @Override
+                public void onActivityResumed(Activity activity) {
+                    if (activity != null) {
+                        String activityName = activity.getClass().getName();
+                        camera2Hook.setCurrentActivityClassName(activityName);
+                        LogUtil.log("【CS】当前 Activity: " + activityName);
+                    }
+                }
+
+                @Override
+                public void onActivityPaused(Activity activity) {
+                }
+
+                @Override
+                public void onActivityStopped(Activity activity) {
+                }
+
+                @Override
+                public void onActivitySaveInstanceState(Activity activity, Bundle outState) {
+                }
+
+                @Override
+                public void onActivityDestroyed(Activity activity) {
+                }
+            });
+        } catch (Throwable t) {
+            activityLifecycleRegistered = false;
+            LogUtil.log("【CS】注册 ActivityLifecycleCallbacks 失败: " + t);
+        }
+    }
+
     private void hookImageReaderNewInstance(ClassLoader classLoader) {
-        // On Android Q+, newInstance(4-param) internally delegates to newInstance(5-param).
-        // Hooking both causes every interceptor to fire twice per call.
-        // Only hook the 5-param version on Q+; on older devices, hook the 4-param version.
+        // Some CameraX builds still invoke the 4-param overload directly on Android Q+.
+        // Hook both overloads and dedupe nested 4 -> 5 delegation with a depth guard.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            hookImageReaderNewInstance(classLoader, int.class, int.class, int.class, int.class);
             hookImageReaderNewInstance(classLoader, int.class, int.class, int.class, int.class, long.class);
         } else {
             hookImageReaderNewInstance(classLoader, int.class, int.class, int.class, int.class);
@@ -289,9 +347,12 @@ public class HookMain {
                             int w = reader.getWidth();
                             int h = reader.getHeight();
                             int fmt = reader.getImageFormat();
+                            boolean alreadyTracked = camera2Hook.isTrackedReaderSurface(surface);
                             camera2Hook.registerImageReaderSurface(surface, fmt, w, h);
-                            LogUtil.log("【CS】已记录 ImageReader.Builder Surface: "
-                                    + surface + " format=" + fmt + " " + w + "x" + h);
+                            if (!alreadyTracked) {
+                                LogUtil.log("【CS】已记录 ImageReader.Builder Surface: "
+                                        + surface + " format=" + fmt + " " + w + "x" + h);
+                            }
                         }
                     }
                 } catch (Throwable t) {
@@ -309,23 +370,47 @@ public class HookMain {
             Method method = resolveMethod(classLoader, "android.media.ImageReader", "newInstance", parameterTypes);
             Api101Runtime.requireModule().hook(method).intercept(chain -> {
                 Object[] args = toArgs(chain.getArgs());
+                boolean isOutermostHook = enterImageReaderNewInstanceHook();
                 try {
-                    onImageReaderNewInstanceBefore(args);
+                    if (isOutermostHook) {
+                        onImageReaderNewInstanceBefore(args);
+                    }
                 } catch (Throwable t) {
                     LogUtil.log("【CS】ImageReader.newInstance before 异常: " + t);
                 }
 
-                Object result = chain.proceed(args);
-
                 try {
-                    onImageReaderNewInstanceAfter(args, result);
-                } catch (Throwable t) {
-                    LogUtil.log("【CS】ImageReader.newInstance after 异常: " + t);
+                    Object result = chain.proceed(args);
+
+                    try {
+                        if (isOutermostHook) {
+                            onImageReaderNewInstanceAfter(args, result);
+                        }
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】ImageReader.newInstance after 异常: " + t);
+                    }
+                    return result;
+                } finally {
+                    exitImageReaderNewInstanceHook();
                 }
-                return result;
             });
         } catch (Throwable t) {
             LogUtil.log("【CS】Hook ImageReader.newInstance 失败: " + t);
+        }
+    }
+
+    private boolean enterImageReaderNewInstanceHook() {
+        int depth = imageReaderNewInstanceHookDepth.get();
+        imageReaderNewInstanceHookDepth.set(depth + 1);
+        return depth == 0;
+    }
+
+    private void exitImageReaderNewInstanceHook() {
+        int depth = imageReaderNewInstanceHookDepth.get();
+        if (depth <= 1) {
+            imageReaderNewInstanceHookDepth.remove();
+        } else {
+            imageReaderNewInstanceHookDepth.set(depth - 1);
         }
     }
 
@@ -357,8 +442,14 @@ public class HookMain {
         ImageReader imageReader = (ImageReader) thisObject;
         Surface surface = imageReader.getSurface();
         Object result;
+        boolean isYuvReader = false;
+        try {
+            isYuvReader = imageReader.getImageFormat() == android.graphics.ImageFormat.YUV_420_888;
+        } catch (Throwable ignored) {
+        }
 
-        if (camera2Hook.shouldBypassYuvAcquireHook(surface)
+        if (!isYuvReader
+                || camera2Hook.shouldBypassYuvAcquireHook(surface)
                 || !camera2Hook.shouldKeepYuvReaderSurfaceForCurrentPackage(surface)) {
             try {
                 result = chain.proceed(args);
@@ -372,7 +463,7 @@ public class HookMain {
             try {
                 result = acquireFakeWhatsAppYuvImage(imageReader, surface, args, originInvoker);
             } catch (Throwable t) {
-                LogUtil.log("【CS】WhatsApp YUV ImageReader 兼容处理失败: " + t);
+                LogUtil.log("【CS】YUV ImageReader 兼容处理失败: " + t);
                 result = chain.proceed(args);
             }
         }
@@ -455,8 +546,11 @@ public class HookMain {
         int width = (int) args[0];
         int height = (int) args[1];
         int format = (int) args[2];
+        boolean alreadyTracked = camera2Hook.isTrackedReaderSurface(surface);
         camera2Hook.registerImageReaderSurface(surface, format, width, height);
-        LogUtil.log("【CS】已记录 ImageReader Surface: " + surface + " format=" + format);
+        if (!alreadyTracked) {
+            LogUtil.log("【CS】已记录 ImageReader Surface: " + surface + " format=" + format);
+        }
     }
 
     private void hookImageReaderListener(ClassLoader classLoader) {
@@ -470,12 +564,31 @@ public class HookMain {
                     camera2Hook.updateImageReaderListener(chain.getThisObject(), args[0],
                             (android.os.Handler) args[1]);
                 } catch (Throwable t) {
-                    LogUtil.log("【CS】更新 WhatsApp YUV listener 失败: " + t);
+                    LogUtil.log("【CS】更新 YUV listener 失败: " + t);
                 }
                 return result;
             });
         } catch (Throwable t) {
             LogUtil.log("【CS】Hook ImageReader.setOnImageAvailableListener 失败: " + t);
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                Method method = resolveMethod(classLoader, "android.media.ImageReader", "setOnImageAvailableListenerWithExecutor",
+                        android.media.ImageReader.OnImageAvailableListener.class, Executor.class);
+                Api101Runtime.requireModule().hook(method).intercept(chain -> {
+                    Object[] args = toArgs(chain.getArgs());
+                    Object result = chain.proceed(args);
+                    try {
+                        camera2Hook.updateImageReaderListener(chain.getThisObject(), args[0], null);
+                    } catch (Throwable t) {
+                        LogUtil.log("【CS】更新 Executor YUV listener 失败: " + t);
+                    }
+                    return result;
+                });
+            } catch (Throwable t) {
+                LogUtil.log("【CS】Hook ImageReader.setOnImageAvailableListenerWithExecutor 失败: " + t);
+            }
         }
     }
 

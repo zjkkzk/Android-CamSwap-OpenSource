@@ -57,6 +57,15 @@ public final class HookGuards {
 
     public static boolean shouldBypassMissingVideo(String packageName, File videoFile) {
         HookMain.need_to_show_toast = !VideoManager.getConfig().getBoolean(ConfigManager.KEY_DISABLE_TOAST, false);
+        if (HookMain.toast_content != null) {
+            try {
+                File privateVideo = new File(HookMain.toast_content.getFilesDir(), "vcam_private.mp4");
+                if (privateVideo.exists() && privateVideo.isFile() && privateVideo.length() > 0) {
+                    return false;
+                }
+            } catch (Exception ignored) {
+            }
+        }
         if (videoFile != null && videoFile.exists()) {
             return false;
         }

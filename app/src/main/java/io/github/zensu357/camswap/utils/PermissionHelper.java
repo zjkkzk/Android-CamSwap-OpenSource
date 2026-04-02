@@ -24,6 +24,17 @@ public class PermissionHelper {
         ConfigManager config = VideoManager.getConfig();
         boolean forcePrivate = config.getBoolean(ConfigManager.KEY_FORCE_PRIVATE_DIR, false);
         boolean providerAvailable = VideoManager.isProviderAvailable();
+        boolean hasPrivateVideoCache = false;
+        try {
+            File privateVideo = new File(context.getFilesDir(), "vcam_private.mp4");
+            hasPrivateVideoCache = privateVideo.exists() && privateVideo.isFile() && privateVideo.length() > 0;
+        } catch (Exception ignored) {
+        }
+
+        if (!providerAvailable && hasPrivateVideoCache) {
+            forcePrivate = true;
+            LogUtil.log("【CS】检测到私有缓存视频，冷启动强制使用私有目录");
+        }
 
         int auth_statue = 0;
         if (providerAvailable) {
@@ -80,7 +91,7 @@ public class PermissionHelper {
         }
 
         LogUtil.log("【CS】权限状态 auth_statue: " + auth_statue + ", forcePrivate: " + forcePrivate + ", provider: "
-                + providerAvailable);
+                + providerAvailable + ", privateCache: " + hasPrivateVideoCache);
 
         if ((auth_statue < 1 && !providerAvailable) || forcePrivate) {
             // Fallback to private directory ONLY if no permission AND no provider, OR
@@ -151,27 +162,30 @@ public class PermissionHelper {
     }
 
     public static void showToast(final Context context, final String message) {
-        if (context != null) {
-            // Check if toasts are disabled
-            try {
-                ConfigManager config = VideoManager.getConfig();
-                if (config != null && config.getBoolean(ConfigManager.KEY_DISABLE_TOAST, false)) {
-                    return;
-                }
-            } catch (Exception e) {
-                // Ignore config check errors and proceed to show toast (safe fallback)
-            }
-
-            new Handler(Looper.getMainLooper()).post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
-                    } catch (Exception e) {
-                        LogUtil.log("【CS】[toast]" + e.toString());
-                    }
-                }
-            });
+        if (context == null) {
+            return;
         }
+        // Check if toasts are disabled — default to suppressed on error,
+        // so a config read failure never causes unwanted toasts.
+        try {
+            ConfigManager config = VideoManager.getConfig();
+            if (config != null && config.getBoolean(ConfigManager.KEY_DISABLE_TOAST, false)) {
+                return;
+            }
+        } catch (Exception e) {
+            LogUtil.log("【CS】showToast config check failed, suppressing toast: " + e);
+            return;
+        }
+
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show();
+                } catch (Exception e) {
+                    LogUtil.log("【CS】[toast]" + e.toString());
+                }
+            }
+        });
     }
 }

@@ -10,6 +10,8 @@ public final class Api101PackageContext {
     public final XposedModuleInterface.PackageReadyParam param;
     public final ClassLoader classLoader;
     public final String packageName;
+    public final String processName;
+    public final String hostPackageName;
     public final ApplicationInfo appInfo;
     public final boolean isFirstPackage;
 
@@ -19,6 +21,20 @@ public final class Api101PackageContext {
         this.classLoader = param.getClassLoader();
         this.packageName = param.getPackageName();
         this.appInfo = param.getApplicationInfo();
+        this.processName = this.appInfo != null ? this.appInfo.processName : this.packageName;
+        this.hostPackageName = resolveHostPackageName(this.packageName, this.processName);
         this.isFirstPackage = param.isFirstPackage();
+    }
+
+    private static String resolveHostPackageName(String packageName, String processName) {
+        String resolved = processName;
+        if (resolved == null || resolved.isEmpty()) {
+            resolved = packageName;
+        }
+        if (resolved == null || resolved.isEmpty()) {
+            return resolved;
+        }
+        int separator = resolved.indexOf(':');
+        return separator > 0 ? resolved.substring(0, separator) : resolved;
     }
 }

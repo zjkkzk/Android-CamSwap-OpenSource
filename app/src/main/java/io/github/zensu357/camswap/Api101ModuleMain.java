@@ -27,8 +27,16 @@ public class Api101ModuleMain extends XposedModule {
                 + " props=" + getFrameworkProperties());
     }
 
-    @Override
+claude
+@Override
     public void onPackageReady(XposedModuleInterface.PackageReadyParam param) {
+        String hostPackage = resolveRuntimeHostPackage();
+        if (hostPackage != null && !hostPackage.isEmpty() && !hostPackage.equals(param.getPackageName())) {
+            LogUtil.log("【CS】跳过非宿主包 onPackageReady: " + param.getPackageName()
+                    + " host=" + hostPackage);
+            return;
+        }
+
         // Deduplicate by package name only — LINE (and some other apps) trigger
         // onPackageReady multiple times with different ClassLoader instances,
         // causing all hooks to be installed twice and every interceptor to fire
@@ -43,5 +51,19 @@ public class Api101ModuleMain extends XposedModule {
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "Hook package failed: " + param.getPackageName(), t);
         }
+    }
+
+    private static String resolveRuntimeHostPackage() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object processName = activityThread.getMethod("currentProcessName").invoke(null);
+            if (processName instanceof String) {
+                String process = (String) processName;
+                int separator = process.indexOf(':');
+                return separator > 0 ? process.substring(0, separator) : process;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 }
