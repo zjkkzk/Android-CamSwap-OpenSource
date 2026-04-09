@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.zensu357.camswap.api101.Api101Runtime;
@@ -37,13 +39,13 @@ public class MicrophoneHandler implements ICameraHandler {
     private static final String TAG = "【CS】[Mic]";
 
     // 方案 B 时长校验：是否已提醒过用户
-    private static volatile boolean durationWarningShown = false;
+    private static final AtomicBoolean durationWarningShown = new AtomicBoolean(false);
 
     // 诊断日志计数器：audioPath 为 null 时限制日志数量
-    private static volatile int audioPathNullLogCount = 0;
+    private static final AtomicInteger audioPathNullLogCount = new AtomicInteger(0);
 
     // 视频同步模式：记住上次已知的播放位置，避免播放器暂时不可用时回退到 0
-    private static volatile long lastKnownPlaybackPositionMs = 0;
+    private static final AtomicLong lastKnownPlaybackPositionMs = new AtomicLong(0);
 
     // 异步加载标记：使用 AtomicBoolean 防止竞态条件导致重复提交加载任务
     private static final AtomicBoolean asyncLoadingInProgress = new AtomicBoolean(false);
@@ -124,8 +126,8 @@ public class MicrophoneHandler implements ICameraHandler {
         String audioPath = AudioDataProvider.getAudioFilePath();
         if (audioPath == null) {
             // 仅在前 3 次打印此日志，避免日志洪泛
-            if (audioPathNullLogCount < 3) {
-                audioPathNullLogCount++;
+            int count = audioPathNullLogCount.getAndIncrement();
+            if (count < 3) {
                 LogUtil.log(TAG + " ⚠ isReplaceMode: audioPath 为 null，音频文件未找到！"
                         + " video_path=" + VideoManager.video_path);
             }
@@ -209,7 +211,7 @@ public class MicrophoneHandler implements ICameraHandler {
                 try {
                     LogUtil.log(TAG + " 异步加载音频: " + filePath);
                     AudioDataProvider.loadAudioFile(filePath);
-                    durationWarningShown = false;
+                    durationWarningShown.set(false);
                     checkDurationMismatch();
                     LogUtil.log(TAG + " 异步加载完成: " + filePath
                             + " ready=" + AudioDataProvider.isReady());
@@ -236,14 +238,14 @@ public class MicrophoneHandler implements ICameraHandler {
             try {
                 if (mp != null && mp.isPlaying()) {
                     long pos = mp.getCurrentPosition();
-                    lastKnownPlaybackPositionMs = pos;
+                    lastKnownPlaybackPositionMs.set(pos);
                     return pos;
                 }
             } catch (Exception ignored) {
             }
         }
         // 返回上次已知位置，避免在播放器暂时不可用时音频跳回开头
-        return lastKnownPlaybackPositionMs;
+        return lastKnownPlaybackPositionMs.get();
     }
 
     /**
@@ -275,7 +277,7 @@ public class MicrophoneHandler implements ICameraHandler {
      * 方案 B 时长校验：对比音频文件与视频文件时长
      */
     private static void checkDurationMismatch() {
-        if (durationWarningShown)
+        if (durationWarningShown.get())
             return;
 
         try {
@@ -311,7 +313,7 @@ public class MicrophoneHandler implements ICameraHandler {
                 LogUtil.log(msg);
                 VideoManager.showToast("音频与视频时长不一致\n音频: " + (audioDuration / 1000)
                         + "s  视频: " + (videoDuration / 1000) + "s");
-                durationWarningShown = true;
+                durationWarningShown.set(true);
             }
         } catch (Exception e) {
             LogUtil.log(TAG + " 时长校验异常: " + e);

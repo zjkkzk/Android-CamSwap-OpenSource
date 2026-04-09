@@ -414,6 +414,7 @@ public class VideoToFrames implements Runnable {
                         if (outputImageFormat != null) {
                             byte[] old = HookMain.data_buffer;
                             HookMain.data_buffer = processedData;
+                            Camera1Handler.notifyPreviewFrameBufferReady();
                             // Do NOT overwrite mwidth/mhight if we are respecting target size
                             // If target size was set, these should match HookMain's expectations already
                             if (targetWidth == 0 || targetHeight == 0) {

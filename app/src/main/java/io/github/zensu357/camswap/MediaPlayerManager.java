@@ -437,14 +437,6 @@ public final class MediaPlayerManager {
             player.setVolume(0, 0);
         player.setLooping(true);
         try {
-            android.os.ParcelFileDescriptor pfd = VideoManager.getVideoPFD();
-            if (pfd != null) {
-                player.setDataSource(pfd.getFileDescriptor());
-                pfd.close();
-            } else {
-                player.setDataSource(getVideoPath());
-            }
-            player.prepare();
             if (rendererRef[0] != null) {
                 player.setSurface(rendererRef[0].getInputSurface());
                 rendererRef[0].setRotation(0);
@@ -461,6 +453,14 @@ public final class MediaPlayerManager {
                     LogUtil.log("【CS】" + tag + " 回退到直接 Surface（无旋转）");
                 }
             }
+
+            android.os.ParcelFileDescriptor pfd = VideoManager.getVideoPFD();
+            if (pfd != null) {
+                player.setDataSource(pfd.getFileDescriptor());
+                pfd.close();
+            } else {
+                player.setDataSource(getVideoPath());
+            }
             player.setOnErrorListener((mp, what, extra) -> {
                 LogUtil.log("【CS】[" + tag + "] MediaPlayer 错误: what=" + what + " extra=" + extra);
                 return true;
@@ -473,6 +473,7 @@ public final class MediaPlayerManager {
                 }
                 return false;
             });
+            player.prepare();
             player.start();
             markCamera2PlaybackStarted(player, tag);
             LogUtil.log("【CS】" + tag + " 已启动播放");

@@ -105,19 +105,13 @@ public final class ConfigWatcher {
 
                     if (IpcContract.ACTION_UPDATE_CONFIG.equals(action)) {
                         handleConfigUpdate(intent);
-                    } else if (IpcContract.ACTION_NEXT.equals(action)) {
-                        handleNextVideo();
-                    } else if (IpcContract.ACTION_ROTATE.equals(action)) {
-                        handleRotate();
                     }
                 }
             };
             IntentFilter filter = new IntentFilter();
             filter.addAction(IpcContract.ACTION_UPDATE_CONFIG);
-            filter.addAction(IpcContract.ACTION_NEXT);
-            filter.addAction(IpcContract.ACTION_ROTATE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
             } else {
                 context.registerReceiver(receiver, filter);
             }
@@ -212,21 +206,4 @@ public final class ConfigWatcher {
         }
     }
 
-    private void handleNextVideo() {
-        if (!VideoManager.isProviderAvailable()) {
-            VideoManager.switchVideo(true);
-            callback.onMediaSourceChanged();
-        } else {
-            if (VideoManager.switchVideo(true)) {
-                callback.onMediaSourceChanged();
-            }
-        }
-    }
-
-    private void handleRotate() {
-        VideoManager.getConfig().forceReload();
-        int newRotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
-        LogUtil.log("【CS】旋转偏移已更新: " + newRotation + "°");
-        callback.onRotationChanged(newRotation);
-    }
 }

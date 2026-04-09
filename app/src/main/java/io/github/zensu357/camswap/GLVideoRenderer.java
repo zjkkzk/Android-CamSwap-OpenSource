@@ -416,16 +416,35 @@ public class GLVideoRenderer implements SurfaceTexture.OnFrameAvailableListener 
         if (mReleased)
             return;
         mReleased = true;
+        CountDownLatch releaseLatch = new CountDownLatch(1);
         if (mGLHandler != null) {
-            mGLHandler.post(this::releaseInternal);
+            mGLHandler.post(() -> {
+                try {
+                    releaseInternal();
+                } finally {
+                    releaseLatch.countDown();
+                }
+            });
+        } else {
+            releaseLatch.countDown();
         }
+
+        try {
+            releaseLatch.await(1000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+
         if (mGLThread != null) {
             mGLThread.quitSafely();
             try {
                 mGLThread.join(1000);
             } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
             }
         }
+        mGLHandler = null;
+        mGLThread = null;
     }
 
     private void releaseInternal() {

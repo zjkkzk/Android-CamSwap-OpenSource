@@ -11,8 +11,11 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class ConfigManager {
     public static final String CONFIG_FILE_NAME = "cs_config.json";
@@ -70,10 +73,11 @@ public class ConfigManager {
     // Fallback switch
     public static boolean ENABLE_LEGACY_FILE_ACCESS = true;
 
-    private JSONObject configData;
-    private long lastLoadedTime = 0;
-    private android.content.Context context; // Context for remote loading
-    private boolean skipProviderReload = false;
+    private final AtomicReference<JSONObject> configData = new AtomicReference<>(new JSONObject());
+    private volatile long lastLoadedTime = 0;
+    private volatile android.content.Context context; // Context for remote loading
+    private volatile boolean skipProviderReload = false;
+    private final Object configWriteLock = new Object();
 
     public ConfigManager() {
         this(true);
@@ -95,19 +99,60 @@ public class ConfigManager {
     }
 
     public JSONObject getConfigData() {
-        return configData;
+        return copyConfig(getConfigSnapshot());
     }
 
-    private long lastReloadTime = 0;
+    private final AtomicLong lastReloadTime = new AtomicLong(0);
     private static final long MIN_RELOAD_INTERVAL_MS = 1000; // 1 second debounce
+
+    private interface ConfigMutation {
+        void apply(JSONObject config) throws JSONException;
+    }
+
+    private JSONObject getConfigSnapshot() {
+        JSONObject snapshot = configData.get();
+        return snapshot != null ? snapshot : new JSONObject();
+    }
+
+    private static JSONObject copyConfig(JSONObject source) {
+        if (source == null) {
+            return new JSONObject();
+        }
+        try {
+            return new JSONObject(source.toString());
+        } catch (JSONException e) {
+            return new JSONObject();
+        }
+    }
+
+    private void setConfigSnapshot(JSONObject snapshot) {
+        configData.set(snapshot != null ? snapshot : new JSONObject());
+    }
+
+    private void updateConfigAndSave(ConfigMutation mutation) {
+        synchronized (configWriteLock) {
+            try {
+                JSONObject updated = copyConfig(getConfigSnapshot());
+                mutation.apply(updated);
+                setConfigSnapshot(updated);
+                save(updated);
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
+        }
+    }
 
     public void reload() {
         long now = System.currentTimeMillis();
-        if (now - lastReloadTime < MIN_RELOAD_INTERVAL_MS) {
-            // Skip reload if too frequent
-            return;
+        while (true) {
+            long last = lastReloadTime.get();
+            if (now - last < MIN_RELOAD_INTERVAL_MS) {
+                return;
+            }
+            if (lastReloadTime.compareAndSet(last, now)) {
+                break;
+            }
         }
-        lastReloadTime = now;
 
         boolean providerSuccess = false;
         if (context != null && !skipProviderReload) {
@@ -124,7 +169,7 @@ public class ConfigManager {
      * 用于 ContentObserver.onChange() 等需要立即读取最新配置的场景。
      */
     public void forceReload() {
-        lastReloadTime = 0; // 重置防抖
+        lastReloadTime.set(0); // 重置防抖
         lastLoadedTime = 0; // 重置文件时间戳，强制重读文件
         reload();
     }
@@ -157,7 +202,7 @@ public class ConfigManager {
                 }
 
                 if (newConfig.length() > 0) {
-                    configData = newConfig;
+                    setConfigSnapshot(newConfig);
                     io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置已通过 Provider 加载 (" + newConfig.length() + " keys)");
                     return true;
                 } else {
@@ -181,6 +226,7 @@ public class ConfigManager {
         try {
             android.content.Intent intent = new android.content.Intent(IpcContract.ACTION_REQUEST_CONFIG);
             intent.setPackage("io.github.zensu357.camswap"); // Explicit intent to wake up host receiver
+            intent.putExtra(IpcContract.EXTRA_REQUESTER_PACKAGE, context.getPackageName());
             context.sendBroadcast(intent);
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】已发送配置请求广播 config request broadcast sent");
         } catch (Exception e) {
@@ -192,9 +238,34 @@ public class ConfigManager {
      * Send current config via broadcast.
      */
     public void sendConfigBroadcast(Context context) {
+        sendConfigBroadcast(context, null);
+    }
+
+    public void sendConfigBroadcast(Context context, String explicitTargetPackage) {
+        Set<String> targetPackages = new HashSet<>();
+        if (explicitTargetPackage != null && !explicitTargetPackage.isEmpty()) {
+            targetPackages.add(explicitTargetPackage);
+        } else {
+            targetPackages.addAll(getTargetPackages());
+        }
+
+        if (targetPackages.isEmpty()) {
+            sendConfigBroadcastInternal(context, null);
+            return;
+        }
+
+        for (String targetPackage : targetPackages) {
+            sendConfigBroadcastInternal(context, targetPackage);
+        }
+    }
+
+    private void sendConfigBroadcastInternal(Context context, String targetPackage) {
         try {
             android.content.Intent intent = new android.content.Intent(IpcContract.ACTION_UPDATE_CONFIG);
-            intent.putExtra(IpcContract.EXTRA_CONFIG_JSON, configData.toString());
+            if (targetPackage != null && !targetPackage.isEmpty()) {
+                intent.setPackage(targetPackage);
+            }
+            intent.putExtra(IpcContract.EXTRA_CONFIG_JSON, getConfigSnapshot().toString());
 
             if (getBoolean(KEY_FORCE_PRIVATE_DIR, false)) {
                 String videoName = getString(KEY_SELECTED_VIDEO, "Cam.mp4");
@@ -247,7 +318,11 @@ public class ConfigManager {
             }
 
             context.sendBroadcast(intent);
-            io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置广播已发送");
+            if (targetPackage != null && !targetPackage.isEmpty()) {
+                io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置广播已发送到: " + targetPackage);
+            } else {
+                io.github.zensu357.camswap.utils.LogUtil.log("【CS】配置广播已发送");
+            }
         } catch (Exception e) {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】广播配置失败: " + e);
         }
@@ -266,61 +341,48 @@ public class ConfigManager {
                 try {
                     StringBuilder stringBuilder = new StringBuilder();
                     try (BufferedReader bufferedReader = new BufferedReader(
-                            new InputStreamReader(new FileInputStream(configFile)))) {
+                            new InputStreamReader(new FileInputStream(configFile), StandardCharsets.UTF_8))) {
                         String line;
                         while ((line = bufferedReader.readLine()) != null) {
                             stringBuilder.append(line);
                         }
                     }
-                    configData = new JSONObject(stringBuilder.toString());
+                    setConfigSnapshot(new JSONObject(stringBuilder.toString()));
                     lastLoadedTime = (fileModTime > 0) ? fileModTime : System.currentTimeMillis();
                     io.github.zensu357.camswap.utils.LogUtil
                             .log("【CS】配置已从文件加载: " + configFile.getName());
                 } catch (Exception e) {
                     io.github.zensu357.camswap.utils.LogUtil.log("【CS】Config file read error: " + e);
-                    if (configData == null)
-                        configData = new JSONObject();
+                    setConfigSnapshot(getConfigSnapshot());
                 }
             } else {
                 // Config file unchanged, skip read
             }
         } else {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】Config file not found: " + configFile.getAbsolutePath());
-            if (configData == null) {
-                configData = new JSONObject();
-            }
+            setConfigSnapshot(getConfigSnapshot());
         }
     }
 
     public boolean getBoolean(String key, boolean defValue) {
-        return configData.optBoolean(key, defValue);
+        return getConfigSnapshot().optBoolean(key, defValue);
     }
 
     public int getInt(String key, int defValue) {
-        return configData.optInt(key, defValue);
+        return getConfigSnapshot().optInt(key, defValue);
     }
 
     public void setInt(String key, int value) {
-        try {
-            configData.put(key, value);
-            save();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        updateConfigAndSave(config -> config.put(key, value));
     }
 
     public void setBoolean(String key, boolean value) {
-        try {
-            configData.put(key, value);
-            save();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        updateConfigAndSave(config -> config.put(key, value));
     }
 
     public Set<String> getTargetPackages() {
         Set<String> packages = new HashSet<>();
-        JSONArray jsonArray = configData.optJSONArray(KEY_TARGET_PACKAGES);
+        JSONArray jsonArray = getConfigSnapshot().optJSONArray(KEY_TARGET_PACKAGES);
         if (jsonArray != null) {
             for (int i = 0; i < jsonArray.length(); i++) {
                 try {
@@ -338,12 +400,7 @@ public class ConfigManager {
         for (String pkg : packages) {
             jsonArray.put(pkg);
         }
-        try {
-            configData.put(KEY_TARGET_PACKAGES, jsonArray);
-            save();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        updateConfigAndSave(config -> config.put(KEY_TARGET_PACKAGES, jsonArray));
     }
 
     public void addTargetPackage(String pkg) {
@@ -359,41 +416,35 @@ public class ConfigManager {
     }
 
     public long getLong(String key, long defValue) {
-        return configData.optLong(key, defValue);
+        return getConfigSnapshot().optLong(key, defValue);
     }
 
     public void setLong(String key, long value) {
-        try {
-            configData.put(key, value);
-            save();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        updateConfigAndSave(config -> config.put(key, value));
     }
 
     public String getString(String key, String defValue) {
-        return configData.optString(key, defValue);
+        return getConfigSnapshot().optString(key, defValue);
     }
 
     public void setString(String key, String value) {
-        try {
-            configData.put(key, value);
-            save();
-        } catch (JSONException e) {
-            e.printStackTrace();
-        }
+        updateConfigAndSave(config -> config.put(key, value));
     }
 
     private void save() {
+        save(getConfigSnapshot());
+    }
+
+    private void save(JSONObject snapshot) {
         File dir = new File(DEFAULT_CONFIG_DIR);
         if (!dir.exists()) {
             dir.mkdirs();
         }
         File configFile = new File(dir, CONFIG_FILE_NAME);
         try {
-            FileOutputStream fos = new FileOutputStream(configFile);
-            fos.write(configData.toString(4).getBytes());
-            fos.close();
+            try (FileOutputStream fos = new FileOutputStream(configFile)) {
+                fos.write(snapshot.toString(4).getBytes(StandardCharsets.UTF_8));
+            }
 
             // Set world-readable so hook processes (inside target apps) can read
             // the config file via direct path when ContentProvider is unavailable.
@@ -403,8 +454,6 @@ public class ConfigManager {
                 // Also chmod parents so directory is traversable
                 dir.setExecutable(true, false);
                 dir.setReadable(true, false);
-                // Double-ensure with Runtime.exec (some ROMs ignore Java setReadable)
-                Runtime.getRuntime().exec(new String[] { "chmod", "644", configFile.getAbsolutePath() });
             } catch (Exception ignored) {
                 // Best-effort
             }
@@ -448,17 +497,23 @@ public class ConfigManager {
     }
 
     public void resetToDefault() {
-        configData = new JSONObject();
-        save();
+        synchronized (configWriteLock) {
+            JSONObject updated = new JSONObject();
+            setConfigSnapshot(updated);
+            save(updated);
+        }
     }
 
     public String exportConfig() {
-        return configData.toString();
+        return getConfigSnapshot().toString();
     }
 
     public void importConfig(String json) throws JSONException {
-        configData = new JSONObject(json);
-        save();
+        synchronized (configWriteLock) {
+            JSONObject updated = new JSONObject(json);
+            setConfigSnapshot(updated);
+            save(updated);
+        }
     }
 
     /**
@@ -467,10 +522,12 @@ public class ConfigManager {
      */
     public void updateConfigFromJSON(String json) {
         try {
-            configData = new JSONObject(json);
+            JSONObject updated = new JSONObject(json);
+            setConfigSnapshot(updated);
             // Update timestamps to prevent reloadFromFile from overwriting
-            lastLoadedTime = System.currentTimeMillis();
-            lastReloadTime = System.currentTimeMillis();
+            long now = System.currentTimeMillis();
+            lastLoadedTime = now;
+            lastReloadTime.set(now);
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】已通过广播更新内存配置");
         } catch (JSONException e) {
             io.github.zensu357.camswap.utils.LogUtil.log("【CS】解析广播配置失败: " + e);

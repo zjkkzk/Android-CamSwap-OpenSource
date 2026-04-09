@@ -19,6 +19,9 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource;
 
 import io.github.zensu357.camswap.utils.LogUtil;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 /**
  * Network stream playback backend using ExoPlayer (Media3).
  * Supports RTSP, RTMP, HLS, DASH, and plain HTTP/HTTPS video streams.
@@ -222,11 +225,32 @@ public final class ExoPlayerBackend implements SurfacePlayerBackend {
 
     @Override
     public void release() {
+        CountDownLatch releaseLatch = new CountDownLatch(1);
         if (playerHandler != null) {
-            playerHandler.post(this::releasePlayerInternal);
+            playerHandler.post(() -> {
+                try {
+                    releasePlayerInternal();
+                } finally {
+                    releaseLatch.countDown();
+                }
+            });
+        } else {
+            releaseLatch.countDown();
         }
+
+        try {
+            releaseLatch.await(1000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+
         if (playerThread != null) {
             playerThread.quitSafely();
+            try {
+                playerThread.join(1000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
             playerThread = null;
         }
         playerHandler = null;

@@ -14,9 +14,15 @@ import android.os.Build;
 import android.os.IBinder;
 import android.widget.RemoteViews;
 
+import io.github.zensu357.camswap.utils.LogUtil;
+
 public class NotificationService extends Service {
     private static final String CHANNEL_ID = "camswap_control_channel";
     private static final int NOTIFICATION_ID = 1001;
+    private static final String ACTION_PREV_INTERNAL = "io.github.zensu357.camswap.action.PREV_INTERNAL";
+    private static final String ACTION_NEXT_INTERNAL = "io.github.zensu357.camswap.action.NEXT_INTERNAL";
+    private static final String ACTION_ROTATE_INTERNAL = "io.github.zensu357.camswap.action.ROTATE_INTERNAL";
+    private static final String ACTION_EXIT_INTERNAL = "io.github.zensu357.camswap.action.EXIT_INTERNAL";
 
     private ConfigManager configManager;
     private int currentRotationOffset = 0;
@@ -26,9 +32,13 @@ public class NotificationService extends Service {
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
             android.util.Log.d("Camswap_NOTIF", "收到操作指令: " + action);
-            if (IpcContract.ACTION_EXIT.equals(action)) {
+            if (ACTION_EXIT_INTERNAL.equals(action)) {
                 stopSelf();
-            } else if (IpcContract.ACTION_ROTATE.equals(action)) {
+            } else if (ACTION_PREV_INTERNAL.equals(action)) {
+                handleSwitch(false);
+            } else if (ACTION_NEXT_INTERNAL.equals(action)) {
+                handleSwitch(true);
+            } else if (ACTION_ROTATE_INTERNAL.equals(action)) {
                 // 循环切换旋转偏移: 0 -> 90 -> 180 -> 270 -> 0
                 currentRotationOffset = (currentRotationOffset + 90) % 360;
                 if (configManager != null) {
@@ -61,11 +71,13 @@ public class NotificationService extends Service {
         currentRotationOffset = configManager.getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
 
         IntentFilter filter = new IntentFilter();
-        filter.addAction(IpcContract.ACTION_EXIT);
-        filter.addAction(IpcContract.ACTION_ROTATE);
+        filter.addAction(ACTION_EXIT_INTERNAL);
+        filter.addAction(ACTION_PREV_INTERNAL);
+        filter.addAction(ACTION_NEXT_INTERNAL);
+        filter.addAction(ACTION_ROTATE_INTERNAL);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(controlReceiver, filter, Context.RECEIVER_EXPORTED);
+            registerReceiver(controlReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(controlReceiver, filter);
         }
@@ -107,14 +119,17 @@ public class NotificationService extends Service {
                 .setContentIntent(pendingIntent)
                 .setOngoing(true);
 
+        builder.addAction(new Notification.Action.Builder(null, getString(R.string.notif_action_prev),
+                getPendingIntent(ACTION_PREV_INTERNAL)).build());
+
         builder.addAction(new Notification.Action.Builder(null, getString(R.string.notif_action_next),
-                getNextPendingIntent()).build());
+                getPendingIntent(ACTION_NEXT_INTERNAL)).build());
 
         builder.addAction(new Notification.Action.Builder(null, rotationLabel,
-                getRotatePendingIntent()).build());
+                getPendingIntent(ACTION_ROTATE_INTERNAL)).build());
 
         builder.addAction(new Notification.Action.Builder(null, getString(R.string.notif_action_exit),
-                getPendingIntent(IpcContract.ACTION_EXIT)).build());
+                getPendingIntent(ACTION_EXIT_INTERNAL)).build());
 
         return builder.build();
     }
@@ -126,16 +141,11 @@ public class NotificationService extends Service {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    private PendingIntent getNextPendingIntent() {
-        Intent intent = new Intent(IpcContract.ACTION_NEXT);
-        return PendingIntent.getBroadcast(this, IpcContract.ACTION_NEXT.hashCode(), intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-    }
-
-    private PendingIntent getRotatePendingIntent() {
-        Intent intent = new Intent(IpcContract.ACTION_ROTATE);
-        return PendingIntent.getBroadcast(this, IpcContract.ACTION_ROTATE.hashCode(), intent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    private void handleSwitch(boolean next) {
+        boolean changed = ControlActionHelper.switchVideo(this, next);
+        if (!changed) {
+            LogUtil.log("【CS】通知栏切换视频未发生变化");
+        }
     }
 
     private void createNotificationChannel() {

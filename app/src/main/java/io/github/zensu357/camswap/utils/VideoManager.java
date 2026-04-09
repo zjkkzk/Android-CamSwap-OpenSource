@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class VideoManager {
     public static String video_path = "/storage/emulated/0/DCIM/Camera1/";
@@ -22,6 +23,7 @@ public class VideoManager {
     public static final String CAM_VIDEO_NAME = "Cam.mp4";
     private static final Object pathLock = new Object();
     private static boolean providerAvailable = false;
+    private static final AtomicBoolean providerBackedVideo = new AtomicBoolean(false);
     private static Context toast_content;
     private static ConfigManager configManager;
     private static long lastPfdFailLogMs = 0L;
@@ -135,16 +137,14 @@ public class VideoManager {
             }
 
             log("【CS】[Private] 开始拷贝视频到私有目录 (" + size + " bytes)...");
-            java.io.FileInputStream fis = new java.io.FileInputStream(pfd.getFileDescriptor());
-            java.io.FileOutputStream fos = new java.io.FileOutputStream(privateFile);
-
-            byte[] buf = new byte[8192];
-            int len;
-            while ((len = fis.read(buf)) > 0) {
-                fos.write(buf, 0, len);
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(pfd.getFileDescriptor());
+                    java.io.FileOutputStream fos = new java.io.FileOutputStream(privateFile)) {
+                byte[] buf = new byte[8192];
+                int len;
+                while ((len = fis.read(buf)) > 0) {
+                    fos.write(buf, 0, len);
+                }
             }
-            fos.close();
-            fis.close();
             log("【CS】[Private] 视频拷贝完成 (" + size + " bytes)");
         } catch (Exception e) {
             log("【CS】[Private] 视频拷贝失败: " + e);
@@ -243,13 +243,15 @@ public class VideoManager {
         return providerAvailable;
     }
 
+    public static boolean isUsingProviderBackedVideo() {
+        return providerBackedVideo.get();
+    }
+
     // Use LogUtil instead of direct XposedBridge to avoid crash in non-Xposed
     // process
     private static void log(String msg) {
         try {
-            // Try to use LogUtil if available
-            Class<?> logUtilClass = Class.forName("io.github.zensu357.camswap.utils.LogUtil");
-            logUtilClass.getMethod("log", String.class).invoke(null, msg);
+            LogUtil.log(msg);
         } catch (Throwable e) {
             // Fallback to standard android log if Xposed bridge is not available
             android.util.Log.i("LSPosed-Bridge", msg);
@@ -279,6 +281,7 @@ public class VideoManager {
 
                 if (privateFile.exists()) {
                     current_video_path = privateFile.getAbsolutePath();
+                    providerBackedVideo.set(false);
                     log("【CS】[Private] 使用私有目录视频: " + current_video_path);
                     return;
                 }
@@ -297,12 +300,13 @@ public class VideoManager {
 
                 checkProviderAvailability();
                 if (providerAvailable) {
-                    // If provider is available, we use it.
-                    // The provider's openFile() will handle the random selection logic.
-                    current_video_path = "/proc/self/cmdline";
+                    providerBackedVideo.set(true);
+                    current_video_path = null;
                     return;
                 }
             }
+
+            providerBackedVideo.set(false);
 
             File camFile = new File(video_path, CAM_VIDEO_NAME);
 
@@ -392,6 +396,9 @@ public class VideoManager {
         synchronized (pathLock) {
             if (current_video_path == null) {
                 updateVideoPath(false);
+            }
+            if (providerBackedVideo.get()) {
+                return null;
             }
             return current_video_path;
         }
@@ -532,7 +539,7 @@ public class VideoManager {
 
     private static MediaSourceDescriptor buildLocalDescriptor() {
         String path = getCurrentVideoPath();
-        boolean useProvider = isProviderAvailable();
+        boolean useProvider = isUsingProviderBackedVideo();
         return MediaSourceDescriptor.localFile(path != null ? path : "")
                 .useProviderPfd(useProvider)
                 .build();

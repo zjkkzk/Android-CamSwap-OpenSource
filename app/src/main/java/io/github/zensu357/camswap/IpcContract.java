@@ -21,6 +21,7 @@ public final class IpcContract {
     public static final String ACTION_EXIT = "io.github.zensu357.camswap.ACTION_CAMSWAP_EXIT";
 
     public static final String EXTRA_CONFIG_JSON = "config_json";
+    public static final String EXTRA_REQUESTER_PACKAGE = "requester_package";
     public static final String EXTRA_VIDEO_BUNDLE = "video_bundle";
     public static final String EXTRA_VIDEO_BINDER = "video_binder";
     public static final String EXTRA_CHANGED = "changed";

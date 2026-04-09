@@ -13,6 +13,7 @@ import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.zensu357.camswap.api101.Api101Runtime;
@@ -23,6 +24,8 @@ import io.github.zensu357.camswap.utils.LogUtil;
 public class Camera1Handler implements ICameraHandler {
     private static final Set<String> hookedPreviewCallbackClasses = Collections
             .newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private static final Object previewFrameLock = new Object();
+    private static final long PREVIEW_FRAME_WAIT_MS = 100L;
 
     @Override
     public void init(final Api101PackageContext packageContext) {
@@ -330,7 +333,7 @@ public class Camera1Handler implements ICameraHandler {
         byte[] nv21 = HookMain.data_buffer;
         byte[] jpegData = null;
 
-        if (nv21 != null && nv21.length > 1) {
+        if (nv21 != null && nv21.length >= 1) {
             try {
                 android.graphics.YuvImage yuvImage = new android.graphics.YuvImage(nv21,
                         android.graphics.ImageFormat.NV21, HookMain.mwidth, HookMain.mhight, null);
@@ -589,9 +592,11 @@ public class Camera1Handler implements ICameraHandler {
                         }
                     } else {
                         HookMain.camera_onPreviewFrame = localcam;
-                        HookMain.mwidth = HookMain.camera_onPreviewFrame.getParameters().getPreviewSize().width;
-                        HookMain.mhight = HookMain.camera_onPreviewFrame.getParameters().getPreviewSize().height;
-                        int frameRate = HookMain.camera_onPreviewFrame.getParameters().getPreviewFrameRate();
+                        Camera.Parameters params = HookMain.camera_onPreviewFrame.getParameters();
+                        Camera.Size previewSize = params != null ? params.getPreviewSize() : null;
+                        HookMain.mwidth = previewSize != null ? previewSize.width : 640;
+                        HookMain.mhight = previewSize != null ? previewSize.height : 480;
+                        int frameRate = params != null ? params.getPreviewFrameRate() : 0;
                         LogUtil.log("【CS】帧预览回调初始化：宽：" + HookMain.mwidth + " 高：" + HookMain.mhight
                                 + " 帧率：" + frameRate);
                         HookMain.need_to_show_toast = !VideoManager.getConfig()
@@ -633,12 +638,24 @@ public class Camera1Handler implements ICameraHandler {
     }
 
     private static void awaitPreviewFrameBuffer() {
-        for (int i = 0; i < 100 && HookMain.data_buffer == null; i++) {
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException ignored) {
-                break;
+        if (HookMain.data_buffer != null) {
+            return;
+        }
+        synchronized (previewFrameLock) {
+            if (HookMain.data_buffer != null) {
+                return;
             }
+            try {
+                previewFrameLock.wait(PREVIEW_FRAME_WAIT_MS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    static void notifyPreviewFrameBufferReady() {
+        synchronized (previewFrameLock) {
+            previewFrameLock.notifyAll();
         }
     }
 }

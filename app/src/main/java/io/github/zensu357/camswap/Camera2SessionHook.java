@@ -197,8 +197,7 @@ public final class Camera2SessionHook {
         }
         String normalized = packageName.toLowerCase(Locale.ROOT);
         return normalized.equals("jp.naver.line.android")
-                || normalized.startsWith("jp.naver.line.android:")
-                || normalized.contains("line");
+                || normalized.startsWith("jp.naver.line.android:");
     }
 
     private boolean shouldUseFakeYuvBridgeForPackage(String packageName) {
@@ -267,20 +266,20 @@ public final class Camera2SessionHook {
                     lastInitPreview1 = null;
                     LogUtil.log("【CS】打开相机C2");
 
-                    File file = new File(VideoManager.getCurrentVideoPath());
+                    File file = HookGuards.getCurrentVideoFile();
                     // If video not found, provider may have started since init —
                     // retry once before giving up
-                    if (!file.exists() && !VideoManager.isProviderAvailable()) {
+                    if (!file.exists() && !VideoManager.isUsingProviderBackedVideo()) {
                         VideoManager.checkProviderAvailability();
                         if (VideoManager.isProviderAvailable()) {
                             VideoManager.getConfig().forceReload();
                             VideoManager.updateVideoPath(false);
-                            file = new File(VideoManager.getCurrentVideoPath());
-                            LogUtil.log("【CS】onOpened 延迟获取 Provider 成功，视频路径: " + file.getAbsolutePath());
+                            file = HookGuards.getCurrentVideoFile();
+                            LogUtil.log("【CS】onOpened 延迟获取 Provider 成功");
                         }
                     }
                     boolean showToast = !VideoManager.getConfig().getBoolean(ConfigManager.KEY_DISABLE_TOAST, false);
-                    if (!file.exists()) {
+                    if (!file.exists() && !VideoManager.isUsingProviderBackedVideo()) {
                         if (HookMain.toast_content != null && showToast) {
                             try {
                                 LogUtil.log("【CS】不存在替换视频: " + HookMain.toast_content.getPackageName()

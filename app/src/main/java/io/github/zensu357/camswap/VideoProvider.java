@@ -5,19 +5,49 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Binder;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.util.Arrays;
-import java.util.Comparator;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.HashSet;
+import java.util.Set;
 
 import io.github.zensu357.camswap.utils.VideoManager;
 
 public class VideoProvider extends ContentProvider {
     private ConfigManager configManager;
+
+    private boolean isCallerAllowed() {
+        android.content.Context context = getContext();
+        if (context == null) {
+            return false;
+        }
+
+        int callingUid = Binder.getCallingUid();
+        if (callingUid == android.os.Process.myUid()) {
+            return true;
+        }
+
+        String[] packages = context.getPackageManager().getPackagesForUid(callingUid);
+        if (packages == null || packages.length == 0) {
+            Log.w("VideoProvider", "Rejecting call with empty package list for uid=" + callingUid);
+            return false;
+        }
+
+        Set<String> allowedPackages = new HashSet<>(configManager.getTargetPackages());
+        allowedPackages.add(context.getPackageName());
+        for (String pkg : packages) {
+            if (allowedPackages.contains(pkg)) {
+                return true;
+            }
+        }
+
+        Log.w("VideoProvider", "Rejecting caller packages=" + java.util.Arrays.toString(packages));
+        return false;
+    }
 
     @Override
     public boolean onCreate() {
@@ -46,6 +76,9 @@ public class VideoProvider extends ContentProvider {
 
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        if (!isCallerAllowed()) {
+            return null;
+        }
         String lastPathSegment = uri.getLastPathSegment();
         if (IpcContract.PATH_CONFIG.equals(lastPathSegment)) {
             configManager.reload();
@@ -105,6 +138,9 @@ public class VideoProvider extends ContentProvider {
 
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+        if (!isCallerAllowed()) {
+            throw new FileNotFoundException("Caller not allowed");
+        }
         configManager.reload();
 
         String lastSeg = uri.getLastPathSegment();
@@ -236,6 +272,11 @@ public class VideoProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
+        if (!isCallerAllowed()) {
+            Bundle denied = new Bundle();
+            denied.putBoolean(IpcContract.EXTRA_CHANGED, false);
+            return denied;
+        }
         configManager.reload();
         boolean changed = false;
 

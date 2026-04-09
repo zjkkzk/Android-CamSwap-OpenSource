@@ -48,7 +48,7 @@ public class HookMain {
     public static Camera origin_preview_camera;
     public static Camera camera_onPreviewFrame;
     public static Camera start_preview_camera;
-    public static volatile byte[] data_buffer = { 0 };
+    public static volatile byte[] data_buffer;
     public static byte[] input;
     public static int mhight;
     public static int mwidth;
