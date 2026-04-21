@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'   # ← 加上这一行
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
